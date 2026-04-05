@@ -102,20 +102,28 @@ npx tsx bin/tl stop     # 정지
 npx tsx bin/tl status   # 상태 확인
 ```
 
-## 🤖 Codex에서 설치하기
+## 🤖 Codex에게 설치 맡기기 (권장)
 
-Codex에게 TL 설치를 맡길 수 있습니다:
+레포에 `PROMPTS.md`를 동봉해두면 Codex가 알아서 설치합니다:
 
+**방법 1: PROMPTS.md 사용 (권장)**
 ```bash
-cd ~/Projects/TL
+cd tl
 codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL"
 ```
 
-또는 한 줄로:
-
+**방법 2: 한 줄 명령어**
 ```bash
-cd ~/Projects/TL && codex exec --full-auto "npm install && npm run build && mkdir -p ~/.codex && echo -e '[features]\ncodex_hooks = true' >> ~/.codex/config.toml && cp templates/hooks.json ~/.codex/hooks.json && npm install -g ."
+codex exec --full-auto "npm install && npm run build && mkdir -p ~/.codex && echo -e '[features]\ncodex_hooks = true' >> ~/.codex/config.toml && cp templates/hooks.json ~/.codex/hooks.json && npm install -g ."
 ```
+
+PROMPTS.md가 하는 일:
+1. `npm install` + `npm run build` — 의존성 설치 및 빌드
+2. `~/.codex/config.toml`에 `codex_hooks = true` 설정
+3. `templates/hooks.json` → `~/.codex/hooks.json` 복사
+4. `npm install -g .` — `tl` 명령어 전역 설치
+5. `npm run test` — 테스트 검증
+6. 봇 토큰/그룹 ID는 건드리지 않음 (사용자 설정 영역)
 
 ---
 
