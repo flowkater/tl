@@ -14,3 +14,6 @@ Thumbs.db
 
 # Config (user-specific, not committed)
 .tl/
+
+# Local git worktrees
+.worktrees/
