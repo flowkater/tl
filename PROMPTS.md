@@ -1,6 +1,6 @@
 # TL 설치 프롬프트
 
-이 문서는 Codex에게 그대로 던질 수 있는 실행 프롬프트다.  
+이 문서는 [README.md](README.md)의 `Install With Codex` 섹션에서 이어지는 상세 실행 문서다.  
 기본 경로는 항상 GitHub URL 기반 전역 설치다.
 
 목표는 세 가지다.
@@ -127,6 +127,7 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 ## 메모
 
+- 공개 진입면은 `README.md`, 한국어 번역은 `README.ko.md`다.
 - 이 프롬프트는 `PROMPTS.md`라는 파일명만 말하는 대신, GitHub URL을 직접 가리키는 흐름을 전제로 쓴다.
 - TL의 기본 설치는 이제 `tl init`/`tl setup` 기준 safe merge를 사용한다.
 - TL plugin은 repo clone 없이 `tl plugin install`로 붙일 수 있다.

@@ -1,6 +1,7 @@
 # Codex에서 TL 설치 & 설정 가이드
 
-이 문서는 Codex CLI 환경에서 TL을 안전하게 붙이는 운영 매뉴얼이다.  
+이 문서는 [README.md](README.md)와 [PROMPTS.md](PROMPTS.md) 다음 단계의 운영자용 상세 매뉴얼이다.  
+공개 설치 진입점은 README의 `Install With Codex` 섹션을 기준으로 하고, 여기서는 예외 처리와 고급 운영 절차를 다룬다.  
 핵심은 `작동`, `기존 hook 보존`, `재설치 용이성` 세 가지다.
 
 ## 0. 시작 경로 선택

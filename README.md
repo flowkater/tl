@@ -1,143 +1,47 @@
-# TL — Codex ↔ Telegram Bridge
+# TL
 
-TL은 Codex 세션을 Telegram topic에 연결하는 로컬 bridge다.
+TL is a local bridge that connects Codex sessions to Telegram topics so you can follow, reply to, and resume work from Telegram without rebuilding your workflow around a browser or chat client.
 
-주요 기능:
+한국어 번역: [README.ko.md](README.ko.md)
 
-- root `SessionStart`에서 Telegram forum topic 생성 또는 기존 topic 재연결
-- `Stop`에서 현재 turn의 assistant `commentary + final`을 Telegram으로 전송
-- Telegram reply로 Codex 다음 턴 재개
-- `waiting`이 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late-reply resume fallback 시도
-- `subagent SessionStart` 무시
-- `tl init` / `tl setup` 기본 동작은 `~/.codex/hooks.json` safe merge
-- `/tl-status`로 bridge 상태 확인
-- optional `UserPromptSubmit -> tl hook-working` 연결 시 `🛠️ resumed, working...` / heartbeat 전송
-- optional `tl plugin install`로 local Codex plugin/MCP tool 설치
+## Why TL
 
-## 설치
+- You get turn-complete messages in Telegram instead of watching the terminal for every stop.
+- Each root Codex session is isolated into its own Telegram topic.
+- A Telegram reply can resume the next Codex turn directly.
+- Late replies can still trigger a fallback resume path after the original stop wait has ended.
+- TL can expose local Codex plugin / MCP tools for status, sessions, daemon control, and config updates.
 
-기본 사용자는 repo를 직접 받을 필요 없이 바로 설치하면 된다.
+## What It Does
 
-```bash
-npm install -g github:flowkater/tl
-tl help
-```
+- Creates or reconnects a Telegram topic on root `SessionStart`.
+- Sends the current turn's assistant `commentary + final` output on `Stop`.
+- Routes topic messages by `thread_id`, and uses message reply matching when `thread_id` is missing.
+- Confirms successful handoff with `reply delivered to Codex` only when the stop hook return path succeeds.
+- Supports late-reply resume fallback through `codex exec resume --dangerously-bypass-approvals-and-sandbox`.
+- Ignores subagent `SessionStart` traffic so only root sessions open topics.
+- Safe-merges TL hooks into existing Codex hook graphs by default.
 
-Codex 안에서 TL 명령을 tool처럼 직접 쓰고 싶으면:
+## Install With Codex
 
-```bash
-tl plugin install
-tl plugin status
-```
-
-TL 자체를 수정하거나 테스트해야 할 때만 source checkout을 받으면 된다.
-
-```bash
-git clone https://github.com/flowkater/tl.git ~/Projects/TL
-cd ~/Projects/TL
-npm install
-npm run build
-npm run test
-npm install -g .
-tl plugin install
-tl plugin status
-```
-
-plugin이 설치되면 Codex에서 아래 TL tool을 직접 사용할 수 있다.
-
-- `tl_status`
-- `tl_list_sessions`
-- `tl_resume_session`
-- `tl_start_daemon`
-- `tl_stop_daemon`
-- `tl_get_config`
-- `tl_set_config`
-
-필요 조건:
-
-- Node.js 20+
-- OpenAI Codex CLI
-- Telegram Bot Token
-- Topics가 켜진 Telegram group/supergroup
-- 대상 group의 `groupId` (`-100...`)
-
-## Codex에 그대로 복사할 설치 프롬프트
-
-아직 Telegram 자격증명이 없으면 설치만 먼저:
+Tell Codex:
 
 ```text
-Install TL from https://github.com/flowkater/tl without cloning the repository first unless you actually need a local checkout. Use `npm install -g github:flowkater/tl`, verify `tl help`, run `tl plugin install` and verify `tl plugin status`, enable `codex_hooks = true` in `~/.codex/config.toml`, and install TL hooks safely with `tl init`. Do not overwrite unrelated hooks in `~/.codex/hooks.json`; TL must be merged exactly once for `SessionStart` and exactly once for `Stop`. If Telegram credentials are missing, stop after installation and tell me the exact next command I should run.
+Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely.
 ```
 
-Telegram 자격증명까지 있으면 Codex가 설치와 설정을 한 번에 끝내게 할 수 있다:
+If you only want the product-facing install path, start there. The detailed execution prompts and advanced setup flow live in the linked docs below.
 
-```text
-Install and configure TL from https://github.com/flowkater/tl without cloning the repository first unless needed. Use `npm install -g github:flowkater/tl`, verify `tl help`, run `tl plugin install` and verify `tl plugin status`, enable `codex_hooks = true` in `~/.codex/config.toml`, and configure TL with `tl setup --non-interactive`. Never overwrite unrelated hooks in `~/.codex/hooks.json`; merge TL hooks safely so `tl hook-session-start` exists exactly once for `SessionStart` and `tl hook-stop-and-wait` exists exactly once for `Stop`. Restart the daemon, verify `tl status`, verify `/tl-status` in Telegram, then report what changed.
-```
+## Docs
 
-## 빠른 설정
+- [Korean translation](README.ko.md)
+- [Codex prompt guide](PROMPTS.md)
+- [Advanced Codex setup guide](CODEX_SETUP.md)
+- [Historical requirements](docs/REQUIREMENTS.md)
 
-아래처럼 Codex에게 전부 맡기면 된다.
+## Status
 
-```bash
-TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
-codex exec --full-auto "Install and configure TL from https://github.com/flowkater/tl without cloning the repository first unless needed. Use npm install -g github:flowkater/tl, verify tl help, run tl plugin install and tl plugin status, enable codex_hooks in ~/.codex/config.toml, run tl setup --non-interactive, preserve existing hooks by safe merge, restart the daemon, verify tl status, verify /tl-status in Telegram, and report the final state."
-```
-
-자격증명이 아직 없으면 설치만:
-
-```bash
-codex exec --full-auto "Install TL from https://github.com/flowkater/tl without cloning the repository first unless needed. Use npm install -g github:flowkater/tl, verify tl help, run tl plugin install and tl plugin status, enable codex_hooks in ~/.codex/config.toml, run tl init with safe hook merge, and stop after installation if Telegram credentials are missing."
-```
-
-## 검증
-
-로컬:
-
-```bash
-tl help
-tl status
-tl plugin status
-cat ~/.codex/config.toml
-cat ~/.codex/hooks.json
-cat ~/.tl/config.json
-```
-
-Telegram:
-
-1. group에서 `/tl-status` 전송
-2. 새 root Codex 세션 시작
-3. topic 생성 확인
-4. Stop 메시지에 reply
-5. `✅ reply delivered to Codex, resuming...` 확인
-
-## 운영 메모
-
-- TL은 root 세션 기준으로 topic을 관리한다.
-- topic 안에서는 일반 메시지도 같은 `thread_id` 기준으로 현재 topic의 최신 세션으로 라우팅된다.
-- `All` 뷰처럼 `thread_id`가 없으면 `Reply`가 필요하다.
-- local plugin은 `~/plugins/tl-tools`와 `~/.agents/plugins/marketplace.json`에 설치된다.
-- reply reaction은 TL이 Telegram reply를 수신했다는 의미다.
-- `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계까지 도달했을 때만 전송된다.
-- late reply는 `codex exec resume --dangerously-bypass-approvals-and-sandbox ...` fallback으로 이어질 수 있다.
-- `tl init --force`만 명시적 overwrite다. 기본 `tl init`과 `tl setup`은 safe merge다.
-- 기존 hook graph에 custom router/wrapper가 있으면 TL direct hook를 무조건 추가하지 말고, 최종 graph에서 TL이 이벤트당 정확히 1회만 남는지 먼저 확인하는 편이 안전하다.
-
-## 문제 해결
-
-### Telegram 메시지가 안 온다
-
-1. `tl status`
-2. `~/.tl/config.json`의 `botToken`, `groupId`
-3. 봇이 올바른 group에 들어가 있는지
-4. Topics가 켜져 있는지
-5. `/tl-status`가 응답하는지
-
-### 고급 환경에서 훅이 두 번 실행된다
-
-복잡한 Codex hook 환경에서는 아래 둘 중 하나가 원인인 경우가 많다.
-
-- TL direct hook와 기존 router/wrapper 내부 TL 호출이 동시에 있음
-- 같은 이벤트에 TL hook가 중복 병합됨
-
-기본 설치 흐름에서는 `tl init`/`tl setup` safe merge만 쓰면 되지만, custom router/wrapper가 있는 환경은 최종 graph에서 TL이 `SessionStart` 1회, `Stop` 1회만 남도록 직접 검증하는 편이 안전하다.
+- TL is a local-only bridge.
+- It requires a Telegram group or supergroup with Topics enabled.
+- It is built around Codex hooks and local daemon coordination.
+- Advanced hook graphs that already use custom routers or wrappers may need manual verification before enabling direct TL hooks.
