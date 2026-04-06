@@ -81,6 +81,8 @@ export class SessionManagerImpl implements SessionManager {
         record.late_reply_resume_started_at = null;
         record.late_reply_resume_error = null;
         record.remote_last_injection_error = null;
+        record.remote_last_resume_at = null;
+        record.remote_last_resume_error = null;
       });
     } else {
       // 새 세션: 토픽 생성
@@ -120,6 +122,8 @@ export class SessionManagerImpl implements SessionManager {
         remote_last_turn_id: null,
         remote_last_injection_at: null,
         remote_last_injection_error: null,
+        remote_last_resume_at: null,
+        remote_last_resume_error: null,
       });
     }
 

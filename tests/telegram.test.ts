@@ -434,6 +434,8 @@ describe('TelegramBot.init', () => {
             remote_mode_enabled: true,
             remote_endpoint: 'ws://127.0.0.1:4321',
             remote_thread_id: 'thread-1',
+            remote_last_resume_at: null,
+            remote_last_resume_error: null,
           },
         },
       ],

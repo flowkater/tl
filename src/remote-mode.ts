@@ -13,6 +13,8 @@ export function ensureRemoteSessionDefaults(record: SessionRecord): void {
   record.remote_last_turn_id ??= null;
   record.remote_last_injection_at ??= null;
   record.remote_last_injection_error ??= null;
+  record.remote_last_resume_at ??= null;
+  record.remote_last_resume_error ??= null;
 }
 
 export function hasRemoteSessionAttachment(record: SessionRecord): boolean {
@@ -35,6 +37,8 @@ export function attachRemoteSession(
   record.remote_thread_id = args.threadId;
   record.remote_last_turn_id = args.lastTurnId ?? null;
   record.remote_last_injection_error = null;
+  record.remote_last_resume_at = null;
+  record.remote_last_resume_error = null;
 }
 
 export function clearRemoteSession(record: SessionRecord): void {
@@ -45,4 +49,6 @@ export function clearRemoteSession(record: SessionRecord): void {
   record.remote_last_turn_id = null;
   record.remote_last_injection_at = null;
   record.remote_last_injection_error = null;
+  record.remote_last_resume_at = null;
+  record.remote_last_resume_error = null;
 }

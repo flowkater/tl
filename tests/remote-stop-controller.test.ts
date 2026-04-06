@@ -31,6 +31,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_turn_id: null,
     remote_last_injection_at: null,
     remote_last_injection_error: null,
+    remote_last_resume_at: null,
+    remote_last_resume_error: null,
     ...overrides,
   };
 }
@@ -63,6 +65,9 @@ describe('RemoteStopController', () => {
         mode: 'start',
         turnId: 'turn-2',
       }),
+      resumeThread: vi.fn().mockResolvedValue({
+        threadId: 'thread-1',
+      }),
     };
     fallback = {
       handle: vi.fn().mockResolvedValue(true),
@@ -75,6 +80,7 @@ describe('RemoteStopController', () => {
   });
 
   it('injects into app-server instead of launching late-reply resume for remote sessions', async () => {
+    store._sessions.s1.remote_last_resume_error = 'stale resume error';
     const controller = new RemoteStopController(store, client, fallback, runtime, {
       notifyDelivered,
       notifyFailed,
@@ -95,11 +101,13 @@ describe('RemoteStopController', () => {
     expect(fallback.handle).not.toHaveBeenCalled();
     expect(notifyDelivered).toHaveBeenCalledWith('s1');
     expect(store._sessions.s1.remote_last_turn_id).toBe('turn-2');
+    expect(store._sessions.s1.remote_last_resume_error).toBeNull();
   });
 
   it('falls back to late-reply resume when remote injection fails', async () => {
     client.injectReply.mockRejectedValueOnce(new Error('socket closed'));
     runtime.ensureAvailable.mockRejectedValueOnce(new Error('restart failed'));
+    client.resumeThread.mockRejectedValueOnce(new Error('resume failed'));
     const controller = new RemoteStopController(store, client, fallback, runtime, {
       notifyDelivered,
       notifyFailed,
@@ -113,8 +121,9 @@ describe('RemoteStopController', () => {
     });
     expect(fallback.handle).toHaveBeenCalledWith('s1', 'continue here');
     expect(notifyDelivered).not.toHaveBeenCalled();
-    expect(notifyFailed).toHaveBeenCalledWith('s1', 'socket closed');
-    expect(store._sessions.s1.remote_last_injection_error).toBe('socket closed');
+    expect(notifyFailed).toHaveBeenCalledWith('s1', 'resume failed');
+    expect(store._sessions.s1.remote_last_injection_error).toBe('restart failed');
+    expect(store._sessions.s1.remote_last_resume_error).toBe('resume failed');
   });
 
   it('restarts app-server and retries remote injection before falling back', async () => {
@@ -146,5 +155,41 @@ describe('RemoteStopController', () => {
     expect(notifyDelivered).toHaveBeenCalledWith('s1');
     expect(store._sessions.s1.remote_last_turn_id).toBe('turn-3');
     expect(store._sessions.s1.remote_last_injection_error).toBeNull();
+  });
+
+  it('resumes the remote thread and retries injection before local fallback', async () => {
+    client.injectReply
+      .mockRejectedValueOnce(new Error('socket closed'))
+      .mockRejectedValueOnce(new Error('thread missing'))
+      .mockResolvedValueOnce({
+        mode: 'start',
+        turnId: 'turn-9',
+      });
+
+    const controller = new RemoteStopController(store, client, fallback, runtime, {
+      notifyDelivered,
+      notifyFailed,
+    });
+
+    const result = await controller.handleReply('s1', 'recover remotely');
+
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-9',
+    });
+    expect(runtime.ensureAvailable).toHaveBeenCalledWith(
+      'ws://127.0.0.1:4321',
+      '/tmp/test'
+    );
+    expect(client.resumeThread).toHaveBeenCalledWith({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      cwd: '/tmp/test',
+    });
+    expect(client.injectReply).toHaveBeenCalledTimes(3);
+    expect(fallback.handle).not.toHaveBeenCalled();
+    expect(store._sessions.s1.remote_last_resume_at).not.toBeNull();
+    expect(store._sessions.s1.remote_last_resume_error).toBeNull();
   });
 });

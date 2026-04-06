@@ -29,6 +29,8 @@ export interface SessionRecord {
   remote_last_turn_id: string | null;
   remote_last_injection_at: string | null;
   remote_last_injection_error: string | null;
+  remote_last_resume_at: string | null;
+  remote_last_resume_error: string | null;
 }
 
 export interface SessionsFile {

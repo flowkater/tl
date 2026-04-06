@@ -39,6 +39,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_turn_id: null,
     remote_last_injection_at: null,
     remote_last_injection_error: null,
+    remote_last_resume_at: null,
+    remote_last_resume_error: null,
     ...overrides,
   };
 }

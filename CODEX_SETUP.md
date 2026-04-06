@@ -290,3 +290,37 @@ codex exec --full-auto "Follow the instructions in https://github.com/flowkater/
 ```
 
 source checkout이 꼭 필요한 경우에만, 그 사실을 별도로 명시해서 Codex에게 맡긴다.
+
+## 11. experimental: remote app-server stop path PoC
+
+이 섹션은 아직 실험 경로다. 기본 TL 설치 흐름은 local mode를 유지하고, 아래는 같은 live remote thread에 reply를 다시 주입하는 PoC를 다룬다.
+
+전제:
+
+- `codex app-server --listen ws://127.0.0.1:<port>`
+- Codex TUI를 `codex --remote ws://127.0.0.1:<port>`로 시작
+- TL 세션을 해당 thread에 수동 attach
+
+attach 예시:
+
+```bash
+tl remote attach 019d5db1-e768-7913-8fad-195cc5266e6a \
+  --thread 019d6300-aaaa-bbbb-cccc-1234567890ab \
+  --endpoint ws://127.0.0.1:8791
+tl remote status 019d5db1-e768-7913-8fad-195cc5266e6a
+```
+
+현재 remote recovery 순서:
+
+1. app-server `turn/start` 또는 `turn/steer`
+2. 실패 시 `/readyz` healthcheck 후 `codex app-server --listen ...` 자동 재기동
+3. 같은 thread에 재주입 재시도
+4. 그래도 실패하면 `thread/resume`
+5. resume 후 같은 thread에 재주입 재시도
+6. 전부 실패하면 마지막 fallback으로 기존 local late-reply resume
+
+중요 제약:
+
+- `thread/resume`은 새로 만든 빈 thread에는 바로 붙지 않는다.
+- 최소 한 번 이상의 materialized turn이 있는 thread에서만 안정적으로 동작한다.
+- 즉 이 PoC는 이미 대화가 진행된 remote TUI thread를 대상으로 본다.

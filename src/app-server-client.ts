@@ -26,6 +26,10 @@ export type RemoteInjectResult = {
   turnId: string;
 };
 
+export type RemoteResumeResult = {
+  threadId: string;
+};
+
 type PendingRequest = {
   resolve: (value: any) => void;
   reject: (reason?: unknown) => void;
@@ -192,6 +196,27 @@ export class AppServerClient {
   constructor(
     private connectionFactory: AppServerConnectionFactory = defaultConnectionFactory
   ) {}
+
+  async resumeThread(args: {
+    endpoint: string;
+    threadId: string;
+    cwd?: string;
+  }): Promise<RemoteResumeResult> {
+    const connection = await this.connectionFactory(args.endpoint);
+    try {
+      const response = await connection.request('thread/resume', {
+        threadId: args.threadId,
+        cwd: args.cwd ?? null,
+      });
+      const threadId = response?.thread?.id ?? args.threadId;
+      if (!threadId) {
+        throw new Error('thread/resume response did not include thread.id');
+      }
+      return { threadId };
+    } finally {
+      await connection.close();
+    }
+  }
 
   async injectReply(args: {
     endpoint: string;

@@ -333,6 +333,8 @@ export function createDaemonApp({
         endpoint: existing.record.remote_endpoint,
         thread_id: existing.record.remote_thread_id,
         last_turn_id: existing.record.remote_last_turn_id,
+        last_resume_at: existing.record.remote_last_resume_at,
+        last_resume_error: existing.record.remote_last_resume_error,
         attached: hasRemoteSessionAttachment(existing.record),
       });
     }
@@ -345,6 +347,8 @@ export function createDaemonApp({
         endpoint: record.remote_endpoint,
         thread_id: record.remote_thread_id,
         last_turn_id: record.remote_last_turn_id,
+        last_resume_at: record.remote_last_resume_at,
+        last_resume_error: record.remote_last_resume_error,
       }));
 
     return c.json({ sessions });
