@@ -5,6 +5,7 @@ import { ReplyQueue } from './reply-queue.js';
 import { TelegramBot } from './telegram.js';
 import { TlError } from './errors.js';
 import { logger } from './logger.js';
+import { hasRemoteSessionAttachment } from './remote-mode.js';
 
 export class SessionManagerImpl implements SessionManager {
   private static readonly FIRST_HEARTBEAT_DELAY_MS = 2 * 60 * 1000;
@@ -79,6 +80,7 @@ export class SessionManagerImpl implements SessionManager {
         record.late_reply_received_at = null;
         record.late_reply_resume_started_at = null;
         record.late_reply_resume_error = null;
+        record.remote_last_injection_error = null;
       });
     } else {
       // 새 세션: 토픽 생성
@@ -112,6 +114,12 @@ export class SessionManagerImpl implements SessionManager {
         late_reply_received_at: null,
         late_reply_resume_started_at: null,
         late_reply_resume_error: null,
+        remote_mode_enabled: false,
+        remote_endpoint: null,
+        remote_thread_id: null,
+        remote_last_turn_id: null,
+        remote_last_injection_at: null,
+        remote_last_injection_error: null,
       });
     }
 
@@ -152,6 +160,45 @@ export class SessionManagerImpl implements SessionManager {
       last_progress_at: existing.record.last_progress_at,
       last_heartbeat_at: existing.record.last_heartbeat_at,
     };
+
+    if (hasRemoteSessionAttachment(existing.record)) {
+      this.store.update(session_id, (record) => {
+        record.status = 'active';
+        record.total_turns = total_turns;
+        record.last_turn_output = last_message;
+        record.stop_message_id = null;
+        record.last_progress_at = null;
+        record.last_heartbeat_at = null;
+      });
+      this.clearHeartbeat(session_id);
+
+      let stopMessageId: number;
+      try {
+        stopMessageId = await this.tg.sendStopMessage(
+          this.config.groupId,
+          existing.record.topic_id,
+          args.turn_id,
+          last_message,
+          total_turns
+        );
+      } catch (err) {
+        this.store.update(session_id, (record) => {
+          record.status = previousState.status;
+          record.total_turns = previousState.total_turns;
+          record.last_turn_output = previousState.last_turn_output;
+          record.stop_message_id = previousState.stop_message_id;
+          record.last_progress_at = previousState.last_progress_at;
+          record.last_heartbeat_at = previousState.last_heartbeat_at;
+        });
+        throw err;
+      }
+
+      this.store.update(session_id, (record) => {
+        record.stop_message_id = stopMessageId;
+      });
+
+      return { decision: 'continue' as const };
+    }
 
     // 1. 세션을 waiting으로 전이
     this.store.update(session_id, (record) => {

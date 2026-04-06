@@ -4,6 +4,7 @@ import os from 'os';
 import { SessionRecord, SessionsFile, SessionStatus } from './types.js';
 import { TlError } from './errors.js';
 import { logger } from './logger.js';
+import { ensureRemoteSessionDefaults } from './remote-mode.js';
 
 function getDataDir(): string {
   return process.env.TL_DATA_DIR || path.join(os.homedir(), '.tl');
@@ -75,6 +76,9 @@ export class SessionsStore {
     }
     if (typeof this.data.version !== 'number') {
       this.data.version = 1;
+    }
+    for (const record of Object.values(this.data.sessions)) {
+      ensureRemoteSessionDefaults(record);
     }
   }
 

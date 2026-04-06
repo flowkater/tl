@@ -8,6 +8,7 @@ import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
 
 type LateReplyHandler = (sessionId: string, replyText: string) => Promise<boolean>;
+type RemoteReplyHandler = (sessionId: string, replyText: string) => Promise<boolean>;
 
 export class TelegramBot {
   private static readonly SEND_RETRY_COUNT = 3;
@@ -19,6 +20,7 @@ export class TelegramBot {
   private store: SessionsStore;
   private replyQueue: ReplyQueue;
   private lateReplyHandler: LateReplyHandler | null = null;
+  private remoteReplyHandler: RemoteReplyHandler | null = null;
 
   constructor(config: DaemonConfig, store: SessionsStore, replyQueue: ReplyQueue) {
     this.config = config;
@@ -28,6 +30,10 @@ export class TelegramBot {
 
   setLateReplyHandler(handler: LateReplyHandler): void {
     this.lateReplyHandler = handler;
+  }
+
+  setRemoteReplyHandler(handler: RemoteReplyHandler): void {
+    this.remoteReplyHandler = handler;
   }
 
   async init(): Promise<void> {
@@ -380,6 +386,25 @@ export class TelegramBot {
     allowLateReplyFromActive: boolean,
     sourceThreadId?: number
   ): Promise<void> {
+    if (this.remoteReplyHandler) {
+      try {
+        const handled = await this.remoteReplyHandler(matched.id, replyText);
+        if (handled) {
+          await this.addReaction(
+            chatId,
+            messageId,
+            this.config.emojiReaction
+          );
+          return;
+        }
+      } catch (err) {
+        logger.warn('Remote reply handler failed', {
+          sessionId: matched.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
     if (matched.record.status === 'waiting') {
       const delivered = this.replyQueue.deliver(
         matched.id,

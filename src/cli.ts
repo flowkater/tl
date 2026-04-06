@@ -37,6 +37,19 @@ function getProjectRoot(): string {
   return path.resolve(distDir, '..');
 }
 
+function getHookPort(): number {
+  const configPath = path.join(getConfigDir(), 'config.json');
+  if (fs.existsSync(configPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return config.hookPort || 9877;
+    } catch {
+      return 9877;
+    }
+  }
+  return 9877;
+}
+
 const command = process.argv[2];
 const args = process.argv.slice(3);
 
@@ -60,6 +73,8 @@ async function main() {
       return cmdConfig(args);
     case 'plugin':
       return cmdPlugin(args);
+    case 'remote':
+      return cmdRemote(args);
     case 'hook-session-start':
       return cmdHookSessionStart();
     case 'hook-stop-and-wait':
@@ -171,16 +186,7 @@ async function cmdStatus() {
 
 // ===== tl sessions =====
 async function cmdSessions(args: string[]) {
-  const configPath = path.join(getConfigDir(), 'config.json');
-  let port = 9877;
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      port = config.hookPort || 9877;
-    } catch {
-      // ignore
-    }
-  }
+  const port = getHookPort();
 
   const filter = args[0]; // 'active', 'waiting', 'completed', or undefined (all)
 
@@ -242,16 +248,7 @@ async function cmdResume(args: string[]) {
     process.exit(1);
   }
 
-  const configPath = path.join(getConfigDir(), 'config.json');
-  let port = 9877;
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      port = config.hookPort || 9877;
-    } catch {
-      // ignore
-    }
-  }
+  const port = getHookPort();
 
   try {
     const res = await fetch(`http://localhost:${port}/hook/resume`, {
@@ -518,18 +515,117 @@ async function cmdPlugin(args: string[]) {
   console.log('Usage: tl plugin install | tl plugin status');
 }
 
-// ===== tl hook-session-start =====
-async function cmdHookSessionStart() {
-  const configPath = path.join(getConfigDir(), 'config.json');
-  let port = 9877;
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      port = config.hookPort || 9877;
-    } catch {
-      // ignore
+async function cmdRemote(args: string[]) {
+  const subcommand = args[0];
+  if (subcommand === 'attach') {
+    return cmdRemoteAttach(args.slice(1));
+  }
+  if (subcommand === 'detach') {
+    return cmdRemoteDetach(args.slice(1));
+  }
+  if (subcommand === 'status') {
+    return cmdRemoteStatus(args.slice(1));
+  }
+
+  console.log('Usage: tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>');
+  console.log('       tl remote detach <session_id>');
+  console.log('       tl remote status [session_id]');
+}
+
+async function cmdRemoteAttach(args: string[]) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    process.stderr.write('Usage: tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>\n');
+    process.exit(1);
+  }
+
+  let threadId = '';
+  let endpoint = '';
+  let lastTurnId: string | null = null;
+
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--thread') {
+      threadId = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--endpoint') {
+      endpoint = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--turn') {
+      lastTurnId = args[i + 1] ?? null;
+      i += 1;
     }
   }
+
+  if (!threadId || !endpoint) {
+    process.stderr.write('Usage: tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/remote/attach`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      thread_id: threadId,
+      endpoint,
+      last_turn_id: lastTurnId,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdRemoteDetach(args: string[]) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    process.stderr.write('Usage: tl remote detach <session_id>\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/remote/detach`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdRemoteStatus(args: string[]) {
+  const sessionId = args[0];
+  const url = new URL(`http://localhost:${getHookPort()}/remote/status`);
+  if (sessionId) {
+    url.searchParams.set('session_id', sessionId);
+  }
+
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
+// ===== tl hook-session-start =====
+async function cmdHookSessionStart() {
+  const port = getHookPort();
 
   const stdin = fs.readFileSync(0, 'utf-8');
   if (!stdin.trim()) {
@@ -618,16 +714,7 @@ async function cmdHookStopAndWait() {
 }
 
 async function cmdHookWorking() {
-  const configPath = path.join(getConfigDir(), 'config.json');
-  let port = 9877;
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      port = config.hookPort || 9877;
-    } catch {
-      // ignore
-    }
-  }
+  const port = getHookPort();
 
   const stdin = fs.readFileSync(0, 'utf-8');
   if (!stdin.trim()) {
@@ -713,6 +800,9 @@ Usage:
   tl config set KEY=VALUE      Set config value
   tl plugin install            Install the local Codex TL plugin
   tl plugin status             Show the local Codex TL plugin status
+  tl remote attach ...         Attach a TL session to a Codex app-server thread
+  tl remote detach <session_id>  Remove remote attachment from a TL session
+  tl remote status [session_id]  Show remote attachment status
   tl help                      Show this help
 
 Internal (used by Codex hooks):

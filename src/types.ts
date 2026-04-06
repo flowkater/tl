@@ -23,6 +23,12 @@ export interface SessionRecord {
   late_reply_received_at: string | null;
   late_reply_resume_started_at: string | null;
   late_reply_resume_error: string | null;
+  remote_mode_enabled: boolean;
+  remote_endpoint: string | null;
+  remote_thread_id: string | null;
+  remote_last_turn_id: string | null;
+  remote_last_injection_at: string | null;
+  remote_last_injection_error: string | null;
 }
 
 export interface SessionsFile {

@@ -200,6 +200,73 @@ describe('daemon entrypoint', () => {
       process.env.TL_ENABLE_MOCK_REPLY = previous;
     }
   });
+
+  it('attaches remote thread metadata through the daemon endpoint', async () => {
+    const session = {
+      status: 'active',
+      chat_id: -1001234567890,
+      project: 'test',
+      cwd: '/tmp/test',
+      model: 'gpt-4.1',
+      topic_id: 42,
+      start_message_id: 100,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      stop_message_id: null,
+      reply_message_id: null,
+      total_turns: 1,
+      last_user_message: '',
+      last_turn_output: '',
+      last_progress_at: null,
+      last_heartbeat_at: null,
+      last_resume_ack_at: null,
+      late_reply_text: null,
+      late_reply_received_at: null,
+      late_reply_resume_started_at: null,
+      late_reply_resume_error: null,
+      remote_mode_enabled: false,
+      remote_endpoint: null,
+      remote_thread_id: null,
+      remote_last_turn_id: null,
+      remote_last_injection_at: null,
+      remote_last_injection_error: null,
+    };
+    const store = {
+      get: vi.fn(() => ({ id: 's1', record: session })),
+      update: vi.fn((_id, fn) => fn(session)),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+      listAll: vi.fn(() => [{ id: 's1', record: session }]),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+    });
+
+    const response = await app.request('http://localhost/remote/attach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: 's1',
+        endpoint: 'ws://127.0.0.1:4321',
+        thread_id: 'thread-1',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: 'attached',
+      session_id: 's1',
+      endpoint: 'ws://127.0.0.1:4321',
+      thread_id: 'thread-1',
+      remote_mode_enabled: true,
+    });
+    expect(session.remote_mode_enabled).toBe(true);
+    expect(session.remote_thread_id).toBe('thread-1');
+    expect(store.save).toHaveBeenCalledTimes(1);
+  });
 });
 
 function makeDeferred() {

@@ -12,6 +12,9 @@ import { LateReplyResumer } from './late-reply-resumer.js';
 import { HookOutput } from './types.js';
 import { logger } from './logger.js';
 import { buildStopMessageFromTranscript } from './assistant-turn-output.js';
+import { AppServerClient } from './app-server-client.js';
+import { RemoteStopController } from './remote-stop-controller.js';
+import { attachRemoteSession, clearRemoteSession, hasRemoteSessionAttachment } from './remote-mode.js';
 
 const startTime = Date.now();
 
@@ -247,6 +250,105 @@ export function createDaemonApp({
     return c.json({ status: 'resumed', session_id: body.session_id });
   });
 
+  // ===== POST /remote/attach =====
+  app.post('/remote/attach', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.session_id || !body.thread_id || !body.endpoint) {
+      return c.json({ error: 'Missing session_id, thread_id, or endpoint' }, 400);
+    }
+
+    const existing = store.get(body.session_id);
+    if (!existing) {
+      return c.json({ error: 'Session not found' }, 404);
+    }
+
+    store.update(body.session_id, (record) => {
+      attachRemoteSession(record, {
+        endpoint: body.endpoint,
+        threadId: body.thread_id,
+        lastTurnId: body.last_turn_id ?? null,
+      });
+    });
+    await store.save();
+
+    return c.json({
+      status: 'attached',
+      session_id: body.session_id,
+      endpoint: body.endpoint,
+      thread_id: body.thread_id,
+      remote_mode_enabled: true,
+    });
+  });
+
+  // ===== POST /remote/detach =====
+  app.post('/remote/detach', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.session_id) {
+      return c.json({ error: 'Missing session_id' }, 400);
+    }
+
+    const existing = store.get(body.session_id);
+    if (!existing) {
+      return c.json({ error: 'Session not found' }, 404);
+    }
+
+    store.update(body.session_id, (record) => {
+      clearRemoteSession(record);
+    });
+    await store.save();
+
+    return c.json({
+      status: 'detached',
+      session_id: body.session_id,
+      remote_mode_enabled: false,
+    });
+  });
+
+  // ===== GET /remote/status =====
+  app.get('/remote/status', async (c) => {
+    const sessionId = c.req.query('session_id');
+
+    if (sessionId) {
+      const existing = store.get(sessionId);
+      if (!existing) {
+        return c.json({ error: 'Session not found' }, 404);
+      }
+
+      return c.json({
+        session_id: sessionId,
+        remote_mode_enabled: existing.record.remote_mode_enabled,
+        endpoint: existing.record.remote_endpoint,
+        thread_id: existing.record.remote_thread_id,
+        last_turn_id: existing.record.remote_last_turn_id,
+        attached: hasRemoteSessionAttachment(existing.record),
+      });
+    }
+
+    const sessions = store
+      .listAll()
+      .filter(({ record }) => hasRemoteSessionAttachment(record))
+      .map(({ id, record }) => ({
+        session_id: id,
+        endpoint: record.remote_endpoint,
+        thread_id: record.remote_thread_id,
+        last_turn_id: record.remote_last_turn_id,
+      }));
+
+    return c.json({ sessions });
+  });
+
   // ===== POST /hook/resume-ack =====
   app.post('/hook/resume-ack', async (c) => {
     let body: any;
@@ -394,9 +496,37 @@ async function main() {
   const lateReplyResumer = new LateReplyResumer(store, tg, {
     groupId: config.groupId,
   });
+  const remoteStopController = new RemoteStopController(
+    store,
+    new AppServerClient(),
+    lateReplyResumer,
+    {
+      notifyDelivered: async (sessionId) => {
+        const existing = store.get(sessionId);
+        if (!existing) {
+          return;
+        }
+
+        await tg.sendResumeAckMessage(config.groupId, existing.record.topic_id);
+        await tg.sendWorkingMessage(config.groupId, existing.record.topic_id);
+
+        store.update(sessionId, (record) => {
+          const now = new Date().toISOString();
+          record.last_resume_ack_at = now;
+          record.last_progress_at = now;
+        });
+        await store.save();
+      },
+      notifyFailed: async () => {},
+    }
+  );
   tg.setLateReplyHandler((sessionId, replyText) => (
     lateReplyResumer.handle(sessionId, replyText)
   ));
+  tg.setRemoteReplyHandler(async (sessionId, replyText) => {
+    const result = await remoteStopController.handleReply(sessionId, replyText);
+    return result.handled;
+  });
 
   const app = createDaemonApp({ store, replyQueue, sessionManager });
 

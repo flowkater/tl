@@ -33,6 +33,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_received_at: null,
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
+    remote_mode_enabled: false,
+    remote_endpoint: null,
+    remote_thread_id: null,
+    remote_last_turn_id: null,
+    remote_last_injection_at: null,
+    remote_last_injection_error: null,
     ...overrides,
   };
 }

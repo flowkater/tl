@@ -419,6 +419,54 @@ describe('TelegramBot.init', () => {
     );
   });
 
+  it('routes matched active topic messages through the remote reply handler before the not-waiting branch', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const remoteReplyHandler = vi.fn().mockResolvedValue(true);
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'active',
+            stop_message_id: 77,
+            remote_mode_enabled: true,
+            remote_endpoint: 'ws://127.0.0.1:4321',
+            remote_thread_id: 'thread-1',
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver: vi.fn().mockReturnValue(false),
+    } as any);
+
+    bot.setRemoteReplyHandler(remoteReplyHandler);
+    (bot as any).bot = { api: { sendMessage, setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: 'continue remotely',
+      },
+    });
+
+    expect(remoteReplyHandler).toHaveBeenCalledWith('s1', 'continue remotely');
+    expect(setMessageReaction).toHaveBeenCalledWith(
+      config.groupId,
+      88,
+      [{ type: 'emoji', emoji: '👍' }]
+    );
+    expect(sendMessage).not.toHaveBeenCalledWith(
+      config.groupId,
+      '⚠️ 지금은 reply 대기 상태가 아닙니다. 다음 작업 완료 메시지에 Reply해주세요',
+      expect.anything()
+    );
+  });
+
   it('routes completed all-view replies through the late reply handler', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
     const setMessageReaction = vi.fn().mockResolvedValue(undefined);

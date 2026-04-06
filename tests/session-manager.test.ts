@@ -109,6 +109,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_received_at: null,
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
+    remote_mode_enabled: false,
+    remote_endpoint: null,
+    remote_thread_id: null,
+    remote_last_turn_id: null,
+    remote_last_injection_at: null,
+    remote_last_injection_error: null,
     ...overrides,
   };
 }
@@ -293,6 +299,36 @@ describe('SessionManagerImpl', () => {
       expect(store._sessions['s1'].last_progress_at).toBe('2026-04-06T00:00:00.000Z');
       expect(store._sessions['s1'].last_heartbeat_at).toBe('2026-04-06T00:02:00.000Z');
       expect(replyQueue.waitFor).not.toHaveBeenCalled();
+    });
+
+    it('returns continue immediately for remote-attached sessions without touching ReplyQueue.waitFor', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+        total_turns: 2,
+        remote_mode_enabled: true,
+        remote_endpoint: 'ws://127.0.0.1:4321',
+        remote_thread_id: 'thread-1',
+      });
+
+      const result = await manager.handleStopAndWait({
+        session_id: 's1',
+        turn_id: 't1',
+        last_message: 'remote stop output',
+        total_turns: 3,
+      });
+
+      expect(result).toEqual({ decision: 'continue' });
+      expect(replyQueue.waitFor).not.toHaveBeenCalled();
+      expect(tg.sendStopMessage).toHaveBeenCalledWith(
+        defaultConfig.groupId,
+        42,
+        't1',
+        'remote stop output',
+        3
+      );
+      expect(store._sessions['s1'].status).toBe('active');
+      expect(store._sessions['s1'].stop_message_id).toBe(200);
     });
   });
 
