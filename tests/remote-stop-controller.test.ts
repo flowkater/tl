@@ -39,6 +39,7 @@ describe('RemoteStopController', () => {
   let store: any;
   let client: any;
   let fallback: any;
+  let runtime: any;
   let notifyDelivered: any;
   let notifyFailed: any;
 
@@ -66,12 +67,15 @@ describe('RemoteStopController', () => {
     fallback = {
       handle: vi.fn().mockResolvedValue(true),
     };
+    runtime = {
+      ensureAvailable: vi.fn().mockResolvedValue(true),
+    };
     notifyDelivered = vi.fn().mockResolvedValue(undefined);
     notifyFailed = vi.fn().mockResolvedValue(undefined);
   });
 
   it('injects into app-server instead of launching late-reply resume for remote sessions', async () => {
-    const controller = new RemoteStopController(store, client, fallback, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, {
       notifyDelivered,
       notifyFailed,
     });
@@ -95,7 +99,8 @@ describe('RemoteStopController', () => {
 
   it('falls back to late-reply resume when remote injection fails', async () => {
     client.injectReply.mockRejectedValueOnce(new Error('socket closed'));
-    const controller = new RemoteStopController(store, client, fallback, {
+    runtime.ensureAvailable.mockRejectedValueOnce(new Error('restart failed'));
+    const controller = new RemoteStopController(store, client, fallback, runtime, {
       notifyDelivered,
       notifyFailed,
     });
@@ -110,5 +115,36 @@ describe('RemoteStopController', () => {
     expect(notifyDelivered).not.toHaveBeenCalled();
     expect(notifyFailed).toHaveBeenCalledWith('s1', 'socket closed');
     expect(store._sessions.s1.remote_last_injection_error).toBe('socket closed');
+  });
+
+  it('restarts app-server and retries remote injection before falling back', async () => {
+    client.injectReply
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
+      .mockResolvedValueOnce({
+        mode: 'start',
+        turnId: 'turn-3',
+      });
+
+    const controller = new RemoteStopController(store, client, fallback, runtime, {
+      notifyDelivered,
+      notifyFailed,
+    });
+
+    const result = await controller.handleReply('s1', 'continue after restart');
+
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-3',
+    });
+    expect(runtime.ensureAvailable).toHaveBeenCalledWith(
+      'ws://127.0.0.1:4321',
+      '/tmp/test'
+    );
+    expect(client.injectReply).toHaveBeenCalledTimes(2);
+    expect(fallback.handle).not.toHaveBeenCalled();
+    expect(notifyDelivered).toHaveBeenCalledWith('s1');
+    expect(store._sessions.s1.remote_last_turn_id).toBe('turn-3');
+    expect(store._sessions.s1.remote_last_injection_error).toBeNull();
   });
 });

@@ -13,6 +13,7 @@ import { HookOutput } from './types.js';
 import { logger } from './logger.js';
 import { buildStopMessageFromTranscript } from './assistant-turn-output.js';
 import { AppServerClient } from './app-server-client.js';
+import { AppServerRuntimeManager } from './app-server-runtime.js';
 import { RemoteStopController } from './remote-stop-controller.js';
 import { attachRemoteSession, clearRemoteSession, hasRemoteSessionAttachment } from './remote-mode.js';
 
@@ -500,6 +501,7 @@ async function main() {
     store,
     new AppServerClient(),
     lateReplyResumer,
+    new AppServerRuntimeManager(),
     {
       notifyDelivered: async (sessionId) => {
         const existing = store.get(sessionId);

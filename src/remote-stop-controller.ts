@@ -1,4 +1,5 @@
 import { AppServerClient, type RemoteInjectResult } from './app-server-client.js';
+import { AppServerRuntimeManager } from './app-server-runtime.js';
 import { hasRemoteSessionAttachment } from './remote-mode.js';
 import { SessionsStore } from './store.js';
 
@@ -24,6 +25,7 @@ export class RemoteStopController {
     private store: SessionsStore,
     private client: AppServerClient,
     private fallback: LateReplyFallback,
+    private runtime: AppServerRuntimeManager,
     options: RemoteStopControllerOptions = {}
   ) {
     this.notifyDelivered = options.notifyDelivered;
@@ -46,18 +48,7 @@ export class RemoteStopController {
         replyText,
       });
 
-      this.store.update(sessionId, (record) => {
-        record.status = 'active';
-        record.last_user_message = replyText;
-        record.remote_last_turn_id = result.turnId;
-        record.remote_last_injection_at = new Date().toISOString();
-        record.remote_last_injection_error = null;
-      });
-      await this.store.save();
-
-      if (this.notifyDelivered) {
-        await this.notifyDelivered(sessionId);
-      }
+      await this.persistRemoteSuccess(sessionId, replyText, result);
 
       return {
         handled: true,
@@ -66,6 +57,17 @@ export class RemoteStopController {
       };
     } catch (err) {
       const message = (err as Error).message;
+      const restarted = await this.tryRestartAndRetry(
+        sessionId,
+        existing.record.remote_endpoint!,
+        existing.record.remote_thread_id!,
+        existing.record.cwd,
+        replyText
+      );
+      if (restarted) {
+        return restarted;
+      }
+
       this.store.update(sessionId, (record) => {
         record.remote_last_injection_error = message;
       });
@@ -81,6 +83,50 @@ export class RemoteStopController {
       }
 
       return { handled: false, mode: 'not-remote' };
+    }
+  }
+
+  private async tryRestartAndRetry(
+    sessionId: string,
+    endpoint: string,
+    threadId: string,
+    cwd: string,
+    replyText: string
+  ): Promise<RemoteReplyHandleResult | null> {
+    try {
+      await this.runtime.ensureAvailable(endpoint, cwd);
+      const retried = await this.client.injectReply({
+        endpoint,
+        threadId,
+        replyText,
+      });
+      await this.persistRemoteSuccess(sessionId, replyText, retried);
+      return {
+        handled: true,
+        mode: 'remote',
+        turnId: retried.turnId,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async persistRemoteSuccess(
+    sessionId: string,
+    replyText: string,
+    result: RemoteInjectResult
+  ): Promise<void> {
+    this.store.update(sessionId, (record) => {
+      record.status = 'active';
+      record.last_user_message = replyText;
+      record.remote_last_turn_id = result.turnId;
+      record.remote_last_injection_at = new Date().toISOString();
+      record.remote_last_injection_error = null;
+    });
+    await this.store.save();
+
+    if (this.notifyDelivered) {
+      await this.notifyDelivered(sessionId);
     }
   }
 }
