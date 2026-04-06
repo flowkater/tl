@@ -55,6 +55,24 @@ export function loadConfig(): DaemonConfig {
       'CONFIG_MISSING'
     );
   }
+  if (!Number.isInteger(config.hookPort) || config.hookPort <= 0 || config.hookPort > 65535) {
+    throw new TlError('hookPort must be an integer between 1 and 65535', 'CONFIG_INVALID');
+  }
+  if (!Number.isInteger(config.stopTimeout) || config.stopTimeout <= 0) {
+    throw new TlError('stopTimeout must be a positive integer', 'CONFIG_INVALID');
+  }
+  if (typeof config.liveStream !== 'boolean') {
+    throw new TlError('liveStream must be a boolean', 'CONFIG_INVALID');
+  }
+  if (typeof config.topicPrefix !== 'string' || config.topicPrefix.trim() === '') {
+    throw new TlError('topicPrefix must be a non-empty string', 'CONFIG_INVALID');
+  }
+  if (typeof config.hookBaseUrl !== 'string' || config.hookBaseUrl.trim() === '') {
+    throw new TlError('hookBaseUrl must be a non-empty string', 'CONFIG_INVALID');
+  }
+  if (typeof config.emojiReaction !== 'string' || config.emojiReaction.trim() === '') {
+    throw new TlError('emojiReaction must be a non-empty string', 'CONFIG_INVALID');
+  }
 
   return config;
 }

@@ -179,6 +179,24 @@ describe('SessionsStore', () => {
     });
   });
 
+  describe('listAll', () => {
+    beforeEach(async () => {
+      await store.load();
+      store.set('a1', makeRecord({ status: 'active' }));
+      store.set('w1', makeRecord({ status: 'waiting' }));
+      store.set('c1', makeRecord({ status: 'completed' }));
+    });
+
+    it('returns sessions across all statuses', () => {
+      const list = store.listAll();
+      expect(list).toHaveLength(3);
+      const ids = list.map((e) => e.id);
+      expect(ids).toContain('a1');
+      expect(ids).toContain('w1');
+      expect(ids).toContain('c1');
+    });
+  });
+
   describe('archiveCompleted', () => {
     beforeEach(async () => {
       await store.load();

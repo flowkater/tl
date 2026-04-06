@@ -1,116 +1,139 @@
 ---
 name: tl-setup
-description: "Codex ↔ Telegram Bridge (TL) 연동 설정. BotFather 토큰, 그룹 ID 등을 순차적으로 수집하고 tl setup을 실행하여 자동 연동."
+description: "Codex ↔ Telegram Bridge(TL) 설치와 설정. repo가 없어도 clone부터 시작하고, safe hooks merge와 daemon 재시작까지 포함해 안전하게 연동한다."
 category: devops
 ---
 
-# TL Setup — Codex ↔ Telegram Bridge 연동
+# TL Setup
 
 ## Trigger
 
-- "tl setup", "tl-setup", "TL 연동", "코덱스 텔레그램 연동", "Codex Telegram bridge", "setup tl"
+- "tl setup"
+- "tl-setup"
+- "TL 연동"
+- "Codex Telegram bridge"
+- "setup tl"
 
-## Prerequisites
+## Principles
 
-- `~/Projects/TL` 디렉토리가 존재해야 함
-- Node.js 20+ 설치되어 있어야 함
-- Telegram Bot Token (@BotFather에서 발급) 필요
-- Telegram Group/Channel ID 필요
+- repo가 없으면 clone부터 시작한다.
+- 기존 `~/.codex/hooks.json`은 보존한다.
+- TL hook는 최종 graph에서 `SessionStart` 1회, `Stop` 1회만 존재해야 한다.
+- router/wrapper가 TL을 이미 내부에서 호출하면 direct TL hook를 또 추가하지 않는다.
+- `tl init --force`는 마지막 수단이다.
 
-## Setup Process
+## Bootstrap
 
-**1단계: 프로젝트 확인**
+### repo가 없는 경우
+
+설치만 필요하면:
 
 ```bash
-cd ~/Projects/TL && ls package.json
+npm install -g github:tonyclaw/tl
+tl help
 ```
 
-프로젝트가 없으면 먼저 clone/설치 필요.
+source가 필요하면:
 
-**2단계: 필요한 값 수집**
+```bash
+git clone https://github.com/tonyclaw/tl.git ~/Projects/TL
+cd ~/Projects/TL
+npm install
+npm run build
+npm run test
+npm install -g .
+```
 
-사용자에게 다음 값을 **순차적으로** 하나씩 물어본다 (한 번에 모두 묻지 않음):
-
-1. **Telegram Bot Token** — @BotFather에게 `/newbot`으로 발급받은 토큰
-   - 형식: `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`
-   - 만약 토큰이 없으면 @BotFather 사용법 안내
-
-2. **Telegram Group/Channel ID** — 연동할 그룹의 ID
-   - 형식: `-1001234567890` (음수, 10~14자리)
-   - 그룹에 봇을 먼저 어드민으로 추가해야 함
-   - ID를 모르면 `@getmyid_bot` 등으로 확인 안내
-
-3. **Hook Port** (선택, 기본값: 9877) — 별도 지정 없으면 기본값 사용
-
-4. **Stop Timeout** (선택, 기본값: 7200) — Codex가 멈춘 후 사용자 답장 대기 시간(초)
-
-5. **Hook Base URL** (선택, 기본값: `http://localhost:{port}`) — 외부에서 접근 가능한 URL
-
-**3단계: tl setup 실행**
-
-수집한 값으로 환경변수를 설정하고 non-interactive 모드로 실행:
+### repo가 이미 있는 경우
 
 ```bash
 cd ~/Projects/TL
-
-# 빌드 확인
+npm install
 npm run build
-
-# 환경변수로 설정
-export TL_BOT_TOKEN="수집한_토큰"
-export TL_GROUP_ID="수집한_그룹ID"
-# 선택사항:
-# export TL_HOOK_PORT=9877
-# export TL_STOP_TIMEOUT=7200
-# export TL_HOOK_BASE_URL="http://localhost:9877"
-
-# 자동 설치
-npx tsx bin/tl setup --non-interactive
+npm run test
+npm install -g .
 ```
 
-**4단계: 검증**
+## Setup Process
+
+### 1. Codex hooks 기능 확인
+
+`~/.codex/config.toml`에서 아래를 보장한다.
+
+```toml
+[features]
+codex_hooks = true
+```
+
+### 2. hooks 설치 전략
+
+기본:
 
 ```bash
-# 데몬 상태 확인
-npx tsx bin/tl status
-
-# 설정 확인
-npx tsx bin/tl config get
-
-# 세션 목록 (아직 없으면 empty)
-npx tsx bin/tl sessions
+tl init
 ```
 
-**5단계: Telegram에서 테스트**
+확인할 것:
 
-사용자에게 안내:
-> 텔레그램 그룹에서 `/tl-status`를 보내서 봇이 응답하는지 확인하세요.
+- `~/.codex/hooks.json` 존재 여부
+- TL direct hook 중복 여부
+- 기존 router/wrapper가 TL을 내부에서 호출하는지 여부
 
-## Interactive Mode
+### 3. Telegram 자격증명 수집
 
-사용자가 터미널에서 직접 실행하려면:
+필요한 값:
+
+1. `TL_BOT_TOKEN`
+2. `TL_GROUP_ID`
+
+추가로 필요한 환경:
+
+- Topics-enabled Telegram group/supergroup
+- 봇이 그 group에 들어가 있어야 함
+
+### 4. 실제 설정
+
+자격증명이 있으면:
 
 ```bash
-cd ~/Projects/TL && npx tsx bin/tl setup
+TL_BOT_TOKEN="..." TL_GROUP_ID="-100..." tl setup --non-interactive
 ```
 
-대화형으로 각 값을 하나씩 물어본다.
+자격증명이 없으면:
 
-## Troubleshooting
+- `tl init`까지만 수행
+- 다음 명령만 남긴다:
 
-### Bot Token이 유효하지 않음
-- @BotFather에서 `/mybots`로 토큰 재발급 확인
-- 토큰 형식: `숫자:영문자`
+```bash
+tl config set botToken="..." groupId=-100...
+tl stop
+tl start
+tl status
+```
 
-### Group ID를 찾을 수 없음
-- 그룹에 봇이 어드민으로 추가되어 있는지 확인
-- `@RawDataBot`이나 `@getmyid_bot`으로 ID 확인
+### 5. 검증
 
-### Daemon이 시작되지 않음
-- 포트 충돌 확인: `lsof -i :9877`
-- 빌드 확인: `npm run build`
-- 로그 확인: `~/.tl/` 디렉토리
+로컬:
 
-### hooks.json이 설치되지 않음
-- `~/.codex/hooks.json` 존재 확인
-- 수동 설치: `npx tsx bin/tl init`
+```bash
+tl help
+tl status
+cat ~/.codex/hooks.json
+cat ~/.tl/config.json
+```
+
+Telegram:
+
+1. `/tl-status`
+2. 새 root Codex 세션 시작
+3. topic 생성 확인
+4. Stop 메시지 reply
+5. resume 확인
+
+## Notes
+
+- TL은 channel이 아니라 forum topic이 있는 group/supergroup을 전제로 한다.
+- `🛠️ resumed, working...`와 heartbeat는 `UserPromptSubmit -> tl hook-working`이 추가돼 있을 때만 동작한다.
+- topic 안에서는 일반 메시지도 같은 `thread_id` 기준으로 세션에 들어간다.
+- `All` 뷰처럼 `thread_id`가 없으면 `Reply`가 필요하다.
+- late reply는 `codex exec resume --dangerously-bypass-approvals-and-sandbox ...` fallback으로 이어질 수 있다.

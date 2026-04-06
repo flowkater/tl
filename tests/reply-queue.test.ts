@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -97,6 +97,23 @@ describe('ReplyQueue', () => {
       const files = fs.readdirSync(queueDir).filter((f) => f.endsWith('.json'));
       expect(files.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('replaces an existing waiter for the same session and resolves the older waiter with continue', async () => {
+      const first = queue.waitFor('s-dup', 10);
+      const second = queue.waitFor('s-dup', 10);
+
+      const firstResult = await first;
+      expect(firstResult).toEqual({ decision: 'continue' });
+
+      const delivered = queue.deliver('s-dup', 'latest reply');
+      expect(delivered).toBe(true);
+
+      const secondResult = await second;
+      expect(secondResult).toEqual({
+        decision: 'block',
+        reason: 'latest reply',
+      });
+    });
   });
 
   describe('file queue', () => {
@@ -149,19 +166,15 @@ describe('ReplyQueue', () => {
   });
 
   describe('cleanup', () => {
-    it('removes orphan entries older than 2 hours', async () => {
-      // orphan 생성을 위해 내부 pending에 직접 접근
+    it('resolves orphan entries older than 2 hours with continue', async () => {
+      vi.useFakeTimers();
       queue.startCleanupInterval(100);
 
-      // waitFor로 pending entry 생성
-      const promise = queue.waitFor('s5', 10);
+      const promise = queue.waitFor('s5', 60 * 60 * 3);
 
-      // cleanup은 2시간 이상만 제거하므로 이 테스트는 즉시 정리 안 됨
-      // 기본 동작 확인만
-      expect(queue).toBeDefined();
+      await vi.advanceTimersByTimeAsync((2 * 60 * 60 * 1000) + 200);
 
-      queue.shutdown();
-      await promise;
+      await expect(promise).resolves.toEqual({ decision: 'continue' });
     });
   });
 });

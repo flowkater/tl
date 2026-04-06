@@ -52,6 +52,15 @@ export class ReplyQueue {
   ): Promise<HookOutput> {
     return new Promise<HookOutput>((resolve) => {
       let settled = false;
+      const previous = this.pending.get(sessionId);
+      if (previous) {
+        logger.warn('Replacing duplicate waiting consumer for session', {
+          sessionId,
+        });
+        previous.resolve({ decision: 'continue' });
+      }
+
+      let pendingEntry!: PendingEntry;
 
       const finish = (output: HookOutput): void => {
         if (settled) {
@@ -60,9 +69,11 @@ export class ReplyQueue {
         settled = true;
 
         const pending = this.pending.get(sessionId);
-        if (pending) {
-          clearTimeout(pending.timer);
+        if (pending === pendingEntry) {
+          clearTimeout(pendingEntry.timer);
           this.pending.delete(sessionId);
+        } else {
+          clearTimeout(pendingEntry.timer);
         }
 
         if (options.signal) {
@@ -82,12 +93,13 @@ export class ReplyQueue {
         finish({ decision: 'continue' });
       };
 
-      this.pending.set(sessionId, {
+      pendingEntry = {
         sessionId,
         resolve: finish,
         timer,
         createdAt: Date.now(),
-      });
+      };
+      this.pending.set(sessionId, pendingEntry);
 
       if (options.signal?.aborted) {
         onAbort();
@@ -230,9 +242,8 @@ export class ReplyQueue {
         // timeout은 waitFor 내부에서 처리되므로 여기서는 orphan만 정리
         if (now - entry.createdAt > 2 * 60 * 60 * 1000) {
           // 2시간 이상 고아 entry 정리
-          clearTimeout(entry.timer);
-          this.pending.delete(sessionId);
           logger.warn('Cleaned up orphan pending entry', { sessionId });
+          entry.resolve({ decision: 'continue' });
         }
       }
     }, intervalMs);

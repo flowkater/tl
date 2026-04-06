@@ -3,6 +3,7 @@ export type SessionStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'fa
 
 export interface SessionRecord {
   status: SessionStatus;
+  chat_id?: number | null;     // Telegram chat/group ID
   project: string;             // cwd
   cwd: string;                 // 작업 디렉토리
   model: string;               // 사용 모델

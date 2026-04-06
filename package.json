@@ -6,14 +6,24 @@
   "scripts": {
     "dev": "tsx watch src/daemon.ts",
     "build": "tsc",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
     "start": "node dist/daemon.js",
-    "tl": "tsx bin/tl",
+    "tl": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "bin": {
     "tl": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "PROMPTS.md",
+    "CODEX_SETUP.md",
+    "skills/tl-setup/SKILL.md"
+  ],
   "dependencies": {
     "@hono/node-server": "^1.8.0",
     "grammy": "^1.42.0",

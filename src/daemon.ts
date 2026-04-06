@@ -100,6 +100,7 @@ export function createDaemonApp({
         last_user_message: body.last_user_message ?? '',
         is_reconnect: isReconnect,
       });
+      await store.save();
 
       const record = store.get(body.session_id);
       return c.json({
@@ -232,7 +233,9 @@ export function createDaemonApp({
     }
 
     // ReplyQueue에 resume 신호 전달
-    const delivered = replyQueue.deliver(body.session_id, '/resume');
+    const delivered = replyQueue.deliver(body.session_id, '/resume', {
+      queueIfMissing: false,
+    });
     if (!delivered) {
       // waiting consumer가 없으면 세션만 active로 변경
       store.update(body.session_id, (record) => {
@@ -302,6 +305,10 @@ export function createDaemonApp({
 
   // ===== POST /hook/mock-reply (PoC 테스트용) =====
   app.post('/hook/mock-reply', async (c) => {
+    if (process.env.TL_ENABLE_MOCK_REPLY !== 'true') {
+      return c.json({ error: 'mock-reply disabled' }, 404);
+    }
+
     const url = new URL(c.req.url);
     const sessionId = url.searchParams.get('session_id');
     if (!sessionId) {
@@ -339,14 +346,13 @@ export function createDaemonApp({
 
   // ===== GET /sessions =====
   app.get('/sessions', (c) => {
-    const allSessions: Record<string, any> = (store as any).data.sessions;
-    const list = Object.entries(allSessions).map(([id, r]: [string, any]) => ({
+    const list = store.listAll().map(({ id, record }) => ({
       session_id: id,
-      status: r.status,
-      project: r.project,
-      topic_id: r.topic_id,
-      total_turns: r.total_turns,
-      started_at: r.started_at,
+      status: record.status,
+      project: record.project,
+      topic_id: record.topic_id,
+      total_turns: record.total_turns,
+      started_at: record.started_at,
     }));
 
     return c.json({ sessions: list });

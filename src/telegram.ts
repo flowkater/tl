@@ -302,9 +302,21 @@ export class TelegramBot {
   private async handleMessage(ctx: Context): Promise<void> {
     const message = ctx.message;
     if (!message) return;
+    if (ctx.chat?.id !== this.config.groupId) {
+      logger.warn('Ignoring Telegram message from unexpected chat', {
+        expectedChatId: this.config.groupId,
+        actualChatId: ctx.chat?.id,
+        messageId: message.message_id,
+      });
+      return;
+    }
 
     const replyText = message.text ?? message.caption ?? '';
     if (!replyText.trim()) {
+      return;
+    }
+    if (this.isStatusCommand(replyText.trim())) {
+      await this.sendStatusMessage(ctx.chat.id, message.message_thread_id);
       return;
     }
 
@@ -316,6 +328,7 @@ export class TelegramBot {
         await this.routeMatchedMessage(
           matched,
           replyText.trim(),
+          ctx.chat.id,
           message.message_id,
           true,
           message.message_thread_id
@@ -331,6 +344,7 @@ export class TelegramBot {
         await this.routeMatchedMessage(
           session,
           replyText.trim(),
+          ctx.chat.id,
           message.message_id,
           false,
           message.message_thread_id
@@ -361,6 +375,7 @@ export class TelegramBot {
   private async routeMatchedMessage(
     matched: { id: string; record: SessionRecord },
     replyText: string,
+    chatId: number,
     messageId: number,
     allowLateReplyFromActive: boolean,
     sourceThreadId?: number
@@ -372,13 +387,13 @@ export class TelegramBot {
       );
       if (delivered) {
         await this.addReaction(
-          this.config.groupId,
+          chatId,
           messageId,
           this.config.emojiReaction
         );
       } else {
         await this.sendNotWaitingMessage(
-          this.config.groupId,
+          chatId,
           sourceThreadId ?? matched.record.topic_id
         );
       }
@@ -393,7 +408,7 @@ export class TelegramBot {
         const handled = await this.lateReplyHandler(matched.id, replyText);
         if (handled) {
           await this.addReaction(
-            this.config.groupId,
+            chatId,
             messageId,
             this.config.emojiReaction
           );
@@ -408,7 +423,7 @@ export class TelegramBot {
     }
 
     await this.sendNotWaitingMessage(
-      this.config.groupId,
+      chatId,
       sourceThreadId ?? matched.record.topic_id
     );
   }
@@ -418,6 +433,10 @@ export class TelegramBot {
   ): { id: string; record: SessionRecord } | null {
     const sessions = this.listReplyTargetSessions();
     for (const { id, record } of sessions) {
+      const recordChatId = record.chat_id ?? this.config.groupId;
+      if (recordChatId !== this.config.groupId) {
+        continue;
+      }
       if (record.stop_message_id === repliedToMessageId) {
         return { id, record };
       }
@@ -429,7 +448,10 @@ export class TelegramBot {
     threadId: number
   ): { id: string; record: SessionRecord } | null {
     const sessions = this.listReplyTargetSessions()
-      .filter(({ record }) => record.topic_id === threadId)
+      .filter(({ record }) => {
+        const recordChatId = record.chat_id ?? this.config.groupId;
+        return record.topic_id === threadId && recordChatId === this.config.groupId;
+      })
       .sort((a, b) => this.getSessionRecencyMs(b.record) - this.getSessionRecencyMs(a.record));
 
     return sessions[0] ?? null;
@@ -437,7 +459,7 @@ export class TelegramBot {
 
   private listReplyTargetSessions(): Array<{ id: string; record: SessionRecord }> {
     const activeSessions = this.store.listActive();
-    const completedSessions = typeof (this.store as any).listByStatus === 'function'
+    const completedSessions = typeof this.store.listByStatus === 'function'
       ? this.store.listByStatus('completed')
       : [];
     const merged = new Map<string, SessionRecord>();
@@ -468,6 +490,30 @@ export class TelegramBot {
   private async sendChatLevelMessage(chatId: number, text: string): Promise<void> {
     if (!this.bot) throw new Error('Bot not initialized');
     await this.bot.api.sendMessage(chatId, text);
+  }
+
+  private async sendStatusMessage(chatId: number, threadId?: number): Promise<void> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const text = [
+      '✅ TL bridge is running',
+      '',
+      `chat_id: ${chatId}`,
+      `thread_id: ${threadId ?? 'none'}`,
+    ].join('\n');
+
+    if (threadId) {
+      await this.bot.api.sendMessage(chatId, text, {
+        message_thread_id: threadId,
+      });
+      return;
+    }
+
+    await this.bot.api.sendMessage(chatId, text);
+  }
+
+  private isStatusCommand(text: string): boolean {
+    return /^\/tl-status(?:@\w+)?$/.test(text);
   }
 
   // ===== MarkdownV2 이스케이프 =====

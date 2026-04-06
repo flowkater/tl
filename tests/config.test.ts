@@ -88,6 +88,35 @@ describe('config', () => {
 
       expect(() => loadConfig()).toThrow(TlError);
     });
+
+    it('throws if numeric fields are invalid', () => {
+      fs.mkdirSync(testDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(testDir, 'config.json'),
+        JSON.stringify({
+          botToken: 'tok',
+          groupId: -100123,
+          hookPort: 'bad-port',
+          stopTimeout: -1,
+        })
+      );
+
+      expect(() => loadConfig()).toThrow(TlError);
+    });
+
+    it('throws if boolean fields are invalid', () => {
+      fs.mkdirSync(testDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(testDir, 'config.json'),
+        JSON.stringify({
+          botToken: 'tok',
+          groupId: -100123,
+          liveStream: 'sometimes',
+        })
+      );
+
+      expect(() => loadConfig()).toThrow(TlError);
+    });
   });
 
   describe('saveConfig', () => {

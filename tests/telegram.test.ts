@@ -259,6 +259,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage, setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_thread_id: 42,
         message_id: 88,
@@ -297,6 +298,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage: vi.fn(), setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         text: 'reply while waiting',
@@ -305,6 +307,71 @@ describe('TelegramBot.init', () => {
     });
 
     expect(deliver).toHaveBeenCalledWith('s1', 'reply while waiting');
+  });
+
+  it('ignores messages from chats outside the configured group', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const deliver = vi.fn().mockReturnValue(true);
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'waiting',
+            stop_message_id: 77,
+            chat_id: config.groupId,
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver,
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: -1009999999999 },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: 'wrong chat',
+        reply_to_message: { message_id: 77 },
+      },
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(setMessageReaction).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('responds to /tl-status in the configured chat without requiring a reply target', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 777 });
+    const bot = new TelegramBot(config, {
+      listActive: () => [],
+      listByStatus: () => [],
+    } as any, {
+      deliver: vi.fn(),
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction: vi.fn() } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '/tl-status',
+      },
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      expect.stringContaining('TL bridge is running'),
+      { message_thread_id: 42 }
+    );
   });
 
   it('uses the late reply handler instead of the not-waiting notice for matched stop replies', async () => {
@@ -330,6 +397,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage, setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         message_thread_id: 42,
@@ -377,6 +445,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage, setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         text: 'completed late reply',
@@ -420,6 +489,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage: vi.fn(), setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         message_thread_id: 42,
@@ -458,6 +528,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage, setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         message_thread_id: 42,
@@ -505,6 +576,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage: vi.fn(), setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_id: 88,
         message_thread_id: 42,
@@ -538,6 +610,7 @@ describe('TelegramBot.init', () => {
     (bot as any).bot = { api: { sendMessage, setMessageReaction } };
 
     await (bot as any).handleMessage({
+      chat: { id: config.groupId },
       message: {
         message_thread_id: 42,
         message_id: 88,

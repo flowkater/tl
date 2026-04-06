@@ -9,6 +9,10 @@ import { spawn } from 'child_process';
 import readline from 'readline';
 import { serializeStopHookOutput } from './stop-hook-output.js';
 import {
+  createTlHooksTemplate,
+  ensureTlHooksInstalled,
+} from './codex-hooks.js';
+import {
   isReconnectSessionStart,
   isSubagentSessionStart,
 } from './session-start-filter.js';
@@ -354,17 +358,21 @@ async function cmdSetup(args: string[]) {
 
   // hooks.json 설치
   console.log('\\n📦 Installing Codex hooks...');
-  const templatePath = path.join(getProjectRoot(), 'templates', 'hooks.json');
   const targetPath = path.join(os.homedir(), '.codex', 'hooks.json');
-  if (fs.existsSync(templatePath)) {
-    const targetDir = path.dirname(targetPath);
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
+  try {
+    const hookInstall = ensureTlHooksInstalled(targetPath);
+    if (hookInstall.created) {
+      console.log(`✅ hooks.json created at ${targetPath}`);
+    } else if (hookInstall.changed) {
+      console.log(`✅ hooks.json updated at ${targetPath}`);
+      if (hookInstall.backupPath) {
+        console.log(`   Backup: ${hookInstall.backupPath}`);
+      }
+    } else {
+      console.log(`✅ TL hooks already installed in ${targetPath}`);
     }
-    fs.copyFileSync(templatePath, targetPath);
-    console.log(`✅ hooks.json installed to ${targetPath}`);
-  } else {
-    console.log('⚠️  hooks.json template not found — run `tl init` manually later');
+  } catch (err) {
+    process.stderr.write(`⚠️  Failed to install hooks.json: ${(err as Error).message}\n`);
   }
 
   // daemon 재시작
@@ -396,24 +404,24 @@ async function cmdSetup(args: string[]) {
   console.log(`   Bot: ${botToken.slice(0, 10)}...`);
   console.log(`   Group: ${groupId}`);
   console.log(`   Hook: ${hookBaseUrl}`);
-  console.log('\\nTest: send /tl-status in your Telegram group to verify.');
+  console.log('\\nVerify: send /tl-status in your Telegram group, then start a new root Codex session.');
 }
 
 // ===== tl init =====
 function cmdInit() {
-  const templatePath = path.join(getProjectRoot(), 'templates', 'hooks.json');
   const targetPath = path.join(os.homedir(), '.codex', 'hooks.json');
-
-  if (!fs.existsSync(templatePath)) {
-    process.stderr.write('hooks.json template not found\n');
-    process.exit(1);
-  }
-
   const force = args.includes('--force');
 
   if (fs.existsSync(targetPath) && !force) {
-    console.log(`hooks.json already exists at ${targetPath}`);
-    console.log('Use --force to overwrite');
+    const result = ensureTlHooksInstalled(targetPath);
+    if (result.changed) {
+      console.log(`hooks.json updated at ${targetPath}`);
+      if (result.backupPath) {
+        console.log(`Backup created at ${result.backupPath}`);
+      }
+    } else {
+      console.log(`TL hooks already installed in ${targetPath}`);
+    }
     return;
   }
 
@@ -422,7 +430,11 @@ function cmdInit() {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  fs.copyFileSync(templatePath, targetPath);
+  fs.writeFileSync(
+    targetPath,
+    JSON.stringify(createTlHooksTemplate(), null, 2),
+    'utf-8'
+  );
   console.log(`hooks.json installed to ${targetPath}`);
 }
 
@@ -669,7 +681,7 @@ Usage:
   tl resume <session_id>       Resume a waiting session
   tl setup                     Interactive setup wizard
   tl setup --non-interactive   Setup with env vars (TL_BOT_TOKEN, etc.)
-  tl init [--force]            Install hooks.json to ~/.codex/
+  tl init [--force]            Merge TL hooks into ~/.codex/hooks.json (overwrite only with --force)
   tl config get [KEY]          Show config
   tl config set KEY=VALUE      Set config value
   tl help                      Show this help

@@ -45,8 +45,8 @@ export class SessionManagerImpl implements SessionManager {
 
     // 상태 검증
     const existing = this.store.get(session_id);
-    if (existing?.record.status === 'active' && !is_reconnect) {
-      throw new TlError('Session already active', 'SESSION_EXISTS');
+    if (existing && !is_reconnect) {
+      throw new TlError('Session already exists', 'SESSION_EXISTS');
     }
 
     let topic_id: number;
@@ -56,8 +56,15 @@ export class SessionManagerImpl implements SessionManager {
       topic_id = existing.record.topic_id;
       this.clearHeartbeat(session_id);
 
+      await this.tg.sendReconnectMessage(
+        this.config.groupId,
+        topic_id,
+        session_id
+      );
+
       this.store.update(session_id, (record) => {
         record.status = 'active';
+        record.chat_id = this.config.groupId;
         record.started_at = new Date().toISOString();
         record.model = model;
         record.total_turns = existing.record.total_turns;
@@ -73,23 +80,24 @@ export class SessionManagerImpl implements SessionManager {
         record.late_reply_resume_started_at = null;
         record.late_reply_resume_error = null;
       });
-
-      await this.tg.sendReconnectMessage(
-        this.config.groupId,
-        topic_id,
-        session_id
-      );
     } else {
       // 새 세션: 토픽 생성
       topic_id = await this.tg.createTopic(project);
+      const startMessageId = await this.tg.sendStartMessage(
+        this.config.groupId,
+        topic_id,
+        session_id,
+        model
+      );
 
       this.store.create(session_id, {
         status: 'active',
+        chat_id: this.config.groupId,
         project,
         cwd: args.cwd,
         model,
         topic_id,
-        start_message_id: 0,
+        start_message_id: startMessageId,
         started_at: new Date().toISOString(),
         completed_at: null,
         stop_message_id: null,
@@ -105,13 +113,6 @@ export class SessionManagerImpl implements SessionManager {
         late_reply_resume_started_at: null,
         late_reply_resume_error: null,
       });
-
-      await this.tg.sendStartMessage(
-        this.config.groupId,
-        topic_id,
-        session_id,
-        model
-      );
     }
 
     logger.info('Session started', {
@@ -143,6 +144,15 @@ export class SessionManagerImpl implements SessionManager {
       );
     }
 
+    const previousState = {
+      status: existing.record.status,
+      total_turns: existing.record.total_turns,
+      last_turn_output: existing.record.last_turn_output,
+      stop_message_id: existing.record.stop_message_id,
+      last_progress_at: existing.record.last_progress_at,
+      last_heartbeat_at: existing.record.last_heartbeat_at,
+    };
+
     // 1. 세션을 waiting으로 전이
     this.store.update(session_id, (record) => {
       record.status = 'waiting';
@@ -166,7 +176,12 @@ export class SessionManagerImpl implements SessionManager {
       );
     } catch (err) {
       this.store.update(session_id, (record) => {
-        record.status = 'active';
+        record.status = previousState.status;
+        record.total_turns = previousState.total_turns;
+        record.last_turn_output = previousState.last_turn_output;
+        record.stop_message_id = previousState.stop_message_id;
+        record.last_progress_at = previousState.last_progress_at;
+        record.last_heartbeat_at = previousState.last_heartbeat_at;
       });
       throw err;
     }
@@ -184,16 +199,18 @@ export class SessionManagerImpl implements SessionManager {
       // 타임아웃 → active 복귀 (에이전트 계속 진행)
       this.store.update(session_id, (record) => {
         record.status = 'active';
+        record.stop_message_id = stopMessageId;
       });
       return { decision: 'continue' as const };
     }
 
     // 4. 사용자 답장 받음 → active 복귀
     const replyText = reply.decision === 'block' ? reply.reason : 'reply';
-      this.store.update(session_id, (record) => {
-        record.status = 'active';
-        record.last_user_message = replyText;
-      });
+    this.store.update(session_id, (record) => {
+      record.status = 'active';
+      record.stop_message_id = stopMessageId;
+      record.last_user_message = replyText;
+    });
 
     return reply;
   }
@@ -270,17 +287,17 @@ export class SessionManagerImpl implements SessionManager {
       );
     }
 
-    this.store.update(session_id, (record) => {
-      record.status = 'completed';
-      record.completed_at = new Date().toISOString();
-    });
-
     await this.tg.sendCompleteMessage(
       this.config.groupId,
       existing.record.topic_id,
       total_turns,
       duration
     );
+
+    this.store.update(session_id, (record) => {
+      record.status = 'completed';
+      record.completed_at = new Date().toISOString();
+    });
 
     logger.info('Session completed', { session_id, total_turns, duration });
   }

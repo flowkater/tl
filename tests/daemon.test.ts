@@ -144,6 +144,62 @@ describe('daemon entrypoint', () => {
       expect(store.save).toHaveBeenCalledTimes(2);
     });
   });
+
+  it('does not queue the /resume control signal when no waiting consumer exists', async () => {
+    const store = {
+      get: vi.fn(() => ({ id: 's1', record: { status: 'waiting' } })),
+      update: vi.fn(),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+      listAll: vi.fn(() => []),
+    };
+    const replyQueue = {
+      deliver: vi.fn().mockReturnValue(false),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: replyQueue as any,
+      sessionManager: {} as any,
+    });
+
+    const response = await app.request('http://localhost/hook/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 's1' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(replyQueue.deliver).toHaveBeenCalledWith('s1', '/resume', {
+      queueIfMissing: false,
+    });
+  });
+
+  it('disables /hook/mock-reply unless explicitly enabled', async () => {
+    const previous = process.env.TL_ENABLE_MOCK_REPLY;
+    delete process.env.TL_ENABLE_MOCK_REPLY;
+
+    const app = createDaemonApp({
+      store: {} as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+    });
+
+    const response = await app.request('http://localhost/hook/mock-reply?session_id=s1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replyText: 'hello' }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'mock-reply disabled' });
+
+    if (previous === undefined) {
+      delete process.env.TL_ENABLE_MOCK_REPLY;
+    } else {
+      process.env.TL_ENABLE_MOCK_REPLY = previous;
+    }
+  });
 });
 
 function makeDeferred() {

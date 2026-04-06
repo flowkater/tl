@@ -60,7 +60,7 @@ function makeTelegramBot() {
     init: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     createTopic: vi.fn().mockResolvedValue(42),
-    sendStartMessage: vi.fn().mockResolvedValue({ messageId: 100 }),
+    sendStartMessage: vi.fn().mockResolvedValue(100),
     sendReconnectMessage: vi.fn().mockResolvedValue(undefined),
     sendStopMessage: vi.fn().mockResolvedValue(200),
     sendCompleteMessage: vi.fn().mockResolvedValue(undefined),
@@ -151,8 +151,26 @@ describe('SessionManagerImpl', () => {
         status: 'active',
         project: 'myproj',
         topic_id: 42,
+        start_message_id: 100,
+        chat_id: defaultConfig.groupId,
       }));
       expect(tg.sendStartMessage).toHaveBeenCalled();
+    });
+
+    it('does not create a session record if the start message fails', async () => {
+      tg.sendStartMessage.mockRejectedValueOnce(new Error('telegram down'));
+
+      await expect(manager.handleSessionStart({
+        session_id: 's1',
+        model: 'gpt-4',
+        turn_id: 't1',
+        project: 'myproj',
+        cwd: '/tmp/myproj',
+        last_user_message: 'hello',
+      })).rejects.toThrow('telegram down');
+
+      expect(store.create).not.toHaveBeenCalled();
+      expect(store._sessions['s1']).toBeUndefined();
     });
 
     it('handles reconnection without creating new topic', async () => {
@@ -187,6 +205,25 @@ describe('SessionManagerImpl', () => {
         cwd: '/tmp/myproj',
         last_user_message: 'hello',
       })).rejects.toThrow(TlError);
+
+      expect(tg.createTopic).not.toHaveBeenCalled();
+      expect(tg.sendStartMessage).not.toHaveBeenCalled();
+    });
+
+    it('rejects non-reconnect start attempts for completed sessions before any Telegram side effect', async () => {
+      store._sessions['s1'] = makeRecord({ status: 'completed' });
+
+      await expect(manager.handleSessionStart({
+        session_id: 's1',
+        model: 'gpt-4',
+        turn_id: 't1',
+        project: 'myproj',
+        cwd: '/tmp/myproj',
+        last_user_message: 'hello',
+      })).rejects.toThrow(TlError);
+
+      expect(tg.createTopic).not.toHaveBeenCalled();
+      expect(tg.sendStartMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -234,6 +271,11 @@ describe('SessionManagerImpl', () => {
       store._sessions['s1'] = makeRecord({
         status: 'active',
         topic_id: 42,
+        total_turns: 3,
+        last_turn_output: 'previous output',
+        stop_message_id: 123,
+        last_progress_at: '2026-04-06T00:00:00.000Z',
+        last_heartbeat_at: '2026-04-06T00:02:00.000Z',
       });
       tg.sendStopMessage.mockRejectedValueOnce(new Error('network down'));
 
@@ -245,7 +287,11 @@ describe('SessionManagerImpl', () => {
       })).rejects.toThrow('network down');
 
       expect(store._sessions['s1'].status).toBe('active');
-      expect(store._sessions['s1'].stop_message_id).toBeNull();
+      expect(store._sessions['s1'].total_turns).toBe(3);
+      expect(store._sessions['s1'].last_turn_output).toBe('previous output');
+      expect(store._sessions['s1'].stop_message_id).toBe(123);
+      expect(store._sessions['s1'].last_progress_at).toBe('2026-04-06T00:00:00.000Z');
+      expect(store._sessions['s1'].last_heartbeat_at).toBe('2026-04-06T00:02:00.000Z');
       expect(replyQueue.waitFor).not.toHaveBeenCalled();
     });
   });
@@ -266,6 +312,23 @@ describe('SessionManagerImpl', () => {
       expect(store._sessions['s1'].status).toBe('completed');
       expect(store._sessions['s1'].completed_at).not.toBeNull();
       expect(tg.sendCompleteMessage).toHaveBeenCalled();
+    });
+
+    it('keeps the session active if complete message delivery fails', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+      });
+      tg.sendCompleteMessage.mockRejectedValueOnce(new Error('telegram down'));
+
+      await expect(manager.handleComplete({
+        session_id: 's1',
+        total_turns: 10,
+        duration: '1h 30m',
+      })).rejects.toThrow('telegram down');
+
+      expect(store._sessions['s1'].status).toBe('active');
+      expect(store._sessions['s1'].completed_at).toBeNull();
     });
 
     it('throws if session not found', async () => {

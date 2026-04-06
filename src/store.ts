@@ -154,6 +154,11 @@ export class SessionsStore {
       .map(([id, record]) => ({ id, record }));
   }
 
+  listAll(): Array<{ id: string; record: SessionRecord }> {
+    return Object.entries(this.data.sessions)
+      .map(([id, record]) => ({ id, record }));
+  }
+
   async archiveCompleted(maxAgeDays: number = 30): Promise<number> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - maxAgeDays);

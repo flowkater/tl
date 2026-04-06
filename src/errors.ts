@@ -2,6 +2,7 @@
 export type TlErrorCode =
   | 'CONFIG_MISSING'
   | 'CONFIG_INVALID'
+  | 'HOOKS_INVALID'
   | 'SESSION_NOT_FOUND'
   | 'SESSION_EXISTS'
   | 'TRANSITION_INVALID'

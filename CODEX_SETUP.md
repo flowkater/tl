@@ -1,9 +1,20 @@
 # Codex에서 TL 설치 & 설정 가이드
 
-이 문서는 Codex CLI 환경에서 TL을 안전하게 붙이는 절차를 설명한다.
-핵심은 "작동"과 "기존 hook 보존"을 동시에 만족시키는 것이다.
+이 문서는 Codex CLI 환경에서 TL을 안전하게 붙이는 운영 매뉴얼이다.  
+핵심은 `작동`, `기존 hook 보존`, `재설치 용이성` 세 가지다.
 
-## 1. TL 설치
+## 0. 시작 경로 선택
+
+### A. repo가 아직 없다
+
+설치만 필요하면:
+
+```bash
+npm install -g github:tonyclaw/tl
+tl help
+```
+
+source도 같이 필요하면:
 
 ```bash
 git clone https://github.com/tonyclaw/tl.git ~/Projects/TL
@@ -12,97 +23,118 @@ npm install
 npm run build
 npm run test
 npm install -g .
-tl help
 ```
 
-## 2. Codex hook 기능 활성화
+### B. repo는 있고 TL만 다시 맞추면 된다
 
-`~/.codex/config.toml`에 아래가 필요하다.
+```bash
+cd ~/Projects/TL
+npm install
+npm run build
+npm run test
+npm install -g .
+```
+
+## 1. Codex hooks 기능 활성화
+
+`~/.codex/config.toml`
 
 ```toml
 [features]
 codex_hooks = true
 ```
 
-파일이 없으면 생성하고, 있으면 기존 내용을 유지한 채 `codex_hooks = true`만 보강한다.
+## 2. Telegram 준비
 
-## 3. Telegram 준비
+필수:
 
-### 봇 토큰
+- BotFather 토큰
+- Topics-enabled group/supergroup
+- `groupId` (`-100...`)
 
-1. [@BotFather](https://t.me/botfather)에서 `/newbot`
-2. 토큰 발급
+권장:
 
-### 그룹
+- 봇 admin 권한
 
-1. Topics가 켜진 Telegram 그룹 준비
-2. 봇 초대
-3. 가능하면 admin 권한 부여
-4. group ID 확보
-   - 보통 `-100...` 형태
+## 3. hooks 설치 전략
 
-## 4. hooks 설치 방식 선택
-
-### A. Clean 환경
-
-`~/.codex/hooks.json`이 아직 없다면:
+### 기본 경로
 
 ```bash
 tl init
 ```
 
-또는
+현재 구현 기준:
 
-```bash
-cp ~/Projects/TL/templates/hooks.json ~/.codex/hooks.json
-```
+- `tl init`은 `~/.codex/hooks.json`을 safe merge한다
+- TL hook가 이미 있으면 no-op이다
+- `tl init --force`만 overwrite다
 
-### B. 기존 hooks.json이 있는 환경
+### 꼭 확인할 것
 
-이 경우가 더 중요하다.
+1. direct TL hook가 이미 있는가
+2. 기존 router/wrapper가 TL을 내부에서 호출하는가
 
-주의:
+운영 원칙:
 
-- `tl setup`은 현재 `~/.codex/hooks.json`을 TL 템플릿으로 덮어쓴다.
-- `tl init --force`도 overwrite다.
-- 기존 wrapper/router가 있으면 TL hook를 direct로 또 추가하면 중복 호출된다.
+- TL direct hook와 router 내부 TL 호출을 동시에 두지 않는다
+- 최종 graph에서 TL은 `SessionStart` 1회, `Stop` 1회만 남긴다
 
-권장 절차:
-
-1. 기존 `~/.codex/hooks.json` 백업
-2. 기존 구조 유지
-3. TL hook 두 개만 중복 없이 병합
-
-필요한 TL command:
-
-`SessionStart`
+### TL 기본 hook 모양
 
 ```json
 {
-  "type": "command",
-  "command": "tl hook-session-start",
-  "statusMessage": "Connecting to Telegram..."
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tl hook-session-start",
+            "statusMessage": "Connecting to Telegram..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tl hook-stop-and-wait",
+            "timeout": 7200
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-`Stop`
+### optional: working / heartbeat
+
+`UserPromptSubmit`에 아래를 추가한 경우에만 working/heartbeat가 보인다.
 
 ```json
 {
-  "type": "command",
-  "command": "tl hook-stop-and-wait",
-  "timeout": 7200
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tl hook-working"
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-최종 조건:
+## 4. TL 설정 저장
 
-- `tl hook-session-start`는 전체 hook graph에서 한 번만
-- `tl hook-stop-and-wait`도 전체 hook graph에서 한 번만
-
-## 5. TL 설정 저장
-
-### Clean 환경에서 간단히
+### 자격증명이 준비된 경우
 
 ```bash
 export TL_BOT_TOKEN="123456:ABCdef..."
@@ -110,105 +142,125 @@ export TL_GROUP_ID="-1001234567890"
 tl setup --non-interactive
 ```
 
-이 방식은 hooks overwrite를 동반할 수 있으므로 clean 환경에서만 권장한다.
+`tl setup`은:
 
-### 기존 custom hook가 있으면 안전하게
+- `~/.tl/config.json` 저장
+- `~/.codex/hooks.json` safe merge
+- daemon 재시작
+
+까지 한 번에 처리한다.
+
+### 자격증명이 아직 없는 경우
+
+hooks만 먼저 설치:
+
+```bash
+tl init
+```
+
+나중에 설정만 넣기:
 
 ```bash
 tl config set \
   botToken="123456:ABCdef..." \
   groupId=-1001234567890 \
   hookPort=9877 \
-  hookBaseUrl="http://localhost:9877" \
   stopTimeout=7200 \
-  emojiReaction="👍" \
-  liveStream=false
+  emojiReaction="👍"
 ```
 
-그 다음 daemon 재시작:
+## 5. daemon 재시작
+
+아래 경우에는 기본적으로 재시작한다.
+
+- `npm install -g .` 직후
+- `tl config set` 직후
+- `~/.tl/config.json` 수동 수정 후
+- hook 구조 변경 후
+
+명령:
 
 ```bash
 tl stop
 tl start
+tl status
 ```
+
+`tl stop`은 daemon이 없어도 치명 오류로 보지 않는다.
 
 ## 6. 검증
 
+로컬:
+
 ```bash
+tl help
 tl status
 cat ~/.codex/config.toml
 cat ~/.codex/hooks.json
 cat ~/.tl/config.json
 ```
 
-Telegram 검증:
+Telegram:
 
-1. 그룹에서 `/tl-status@<bot_username>` 전송
-2. 봇 응답 확인
-3. 새 root Codex 세션 시작
-4. topic 생성 확인
+1. `/tl-status`
+2. 새 root Codex 세션 시작
+3. topic 생성 확인
+4. Stop 메시지 reply
+5. `✅ reply delivered to Codex, resuming...` 확인
 
-## 7. 운영 시 알아둘 점
+## 7. 재설치 / 업데이트 규칙
+
+기본 원칙:
+
+- `~/.tl/config.json`은 유지한다
+- 이미 병합된 `~/.codex/hooks.json`도 유지한다
+- hook shape 변경이 없는 릴리스에서는 `tl init --force`를 다시 쓰지 않는다
+
+업데이트:
+
+```bash
+cd ~/Projects/TL
+git pull
+npm install
+npm run build
+npm run test
+npm install -g .
+tl stop
+tl start
+tl status
+```
+
+## 8. rollback
+
+문제가 생기면:
+
+1. `~/.codex/hooks.json.backup-*` 중 최신 백업 확인
+2. 원래 `~/.codex/hooks.json`으로 복원
+3. `tl stop`
+4. `tl start`
+5. `tl status`
+
+## 9. 운영 메모
 
 - TL은 root 세션 기준으로 topic을 관리한다.
 - subagent `SessionStart`는 무시된다.
-- `resume`은 기존 topic에 다시 붙는다.
-- Stop hook는 Telegram reply를 기다릴 수 있다.
-- Stop 메시지 본문은 현재 turn의 assistant `commentary + final`을 transcript에서 합쳐서 만든다.
-- 긴 Stop 메시지는 여러 조각으로 나뉘어 전송될 수 있다.
-- `waiting` 중 reply가 consumer보다 먼저 와도 queue에 저장됐다가 같은 wait에서 소비된다.
-- reply reaction은 TL 수신만 의미한다.
-- `✅ reply delivered to Codex, resuming...` 메시지는 `hook-stop-and-wait`가 성공 경로를 끝낸 뒤에만 전송된다.
-- 재개 후 root 세션에는 `🛠️ resumed, working...` 메시지가 1회 전송되고, 장시간 작업에서만 `⏳ still working...` heartbeat가 추가된다.
-- 같은 topic 안에서는 일반 메시지도 `thread_id` 기준으로 해당 topic의 최신 세션으로 라우팅된다. `All` 뷰처럼 `thread_id`가 없을 때만 `Reply`가 필요하다.
-- `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 TL은 `completed` 세션까지 `stop_message_id`로 매칭하고, late reply를 기록한 뒤 `codex exec resume --dangerously-bypass-approvals-and-sandbox <session_id> <reply>` fallback을 시도한다.
+- topic 안에서는 일반 메시지도 `thread_id` 기준으로 현재 topic의 최신 세션으로 라우팅된다.
+- `All` 뷰처럼 `thread_id`가 없으면 `Reply`가 필요하다.
+- reply reaction은 Telegram 수신만 의미한다.
+- `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계에서만 전송된다.
+- `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late reply resume fallback이 시도된다.
 
-## 8. 문제 해결
+## 10. Codex에게 맡기기
 
-### 훅이 두 번 실행됨
-
-원인:
-
-- TL direct hook와 wrapper/router 내부 TL 호출이 동시에 존재
-
-해결:
-
-- TL 훅 경로를 하나로 정리한다.
-
-### Telegram 메시지가 안 옴
-
-체크:
-
-1. `tl status`
-2. `~/.tl/config.json`
-3. bot admin 여부
-4. Topics 활성화 여부
-5. `/tl-status@<bot_username>` 응답 여부
-
-참고:
-
-- TL은 일부 macOS/Node 환경에서 Telegram HTTPS 타임아웃을 피하려고 IPv4 agent를 사용한다.
-
-### Stop hook가 오래 걸림
-
-이유는 둘 중 하나다.
-
-- 실제로 Telegram reply를 기다리는 정상 동작
-- 전송 실패 후 재시도 또는 session mapping 문제
-
-## 9. Codex에게 설치 맡기기
-
-가장 안전한 방식은 `PROMPTS.md`를 그대로 쓰는 것이다.
+repo가 이미 있으면:
 
 ```bash
 cd ~/Projects/TL
-codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL safely"
+codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
 
-자격증명을 같이 넘길 수도 있다.
+repo가 아직 없으면:
 
 ```bash
-cd ~/Projects/TL
-TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
-  codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL safely"
+codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely. If https://github.com/tonyclaw/tl is not cloned locally yet, clone it first."
 ```
