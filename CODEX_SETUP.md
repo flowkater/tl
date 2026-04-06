@@ -10,19 +10,23 @@
 설치만 필요하면:
 
 ```bash
-npm install -g github:tonyclaw/tl
+npm install -g github:flowkater/tl
 tl help
+tl plugin install
+tl plugin status
 ```
 
 source도 같이 필요하면:
 
 ```bash
-git clone https://github.com/tonyclaw/tl.git ~/Projects/TL
+git clone https://github.com/flowkater/tl.git ~/Projects/TL
 cd ~/Projects/TL
 npm install
 npm run build
 npm run test
 npm install -g .
+tl plugin install
+tl plugin status
 ```
 
 ### B. repo는 있고 TL만 다시 맞추면 된다
@@ -33,6 +37,8 @@ npm install
 npm run build
 npm run test
 npm install -g .
+tl plugin install
+tl plugin status
 ```
 
 ## 1. Codex hooks 기능 활성화
@@ -55,6 +61,30 @@ codex_hooks = true
 권장:
 
 - 봇 admin 권한
+
+## 2.5. TL local plugin
+
+TL은 optional local Codex plugin을 제공한다.
+
+```bash
+tl plugin install
+tl plugin status
+```
+
+설치 위치:
+
+- `~/plugins/tl-tools`
+- `~/.agents/plugins/marketplace.json`
+
+제공 tool:
+
+- `tl_status`
+- `tl_list_sessions`
+- `tl_resume_session`
+- `tl_start_daemon`
+- `tl_stop_daemon`
+- `tl_get_config`
+- `tl_set_config`
 
 ## 3. hooks 설치 전략
 
@@ -195,6 +225,7 @@ tl status
 ```bash
 tl help
 tl status
+tl plugin status
 cat ~/.codex/config.toml
 cat ~/.codex/hooks.json
 cat ~/.tl/config.json
@@ -256,11 +287,11 @@ repo가 이미 있으면:
 
 ```bash
 cd ~/Projects/TL
-codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely"
+codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
 
 repo가 아직 없으면:
 
 ```bash
-codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely. If https://github.com/tonyclaw/tl is not cloned locally yet, clone it first."
+codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```

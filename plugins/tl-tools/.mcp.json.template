@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tl-tools": {
+      "type": "stdio",
+      "command": "__NODE_BINARY__",
+      "args": [
+        "__MCP_SERVER_PATH__"
+      ],
+      "env": {
+        "TL_PLUGIN_TL_CLI_JS": "__TL_CLI_JS__"
+      }
+    }
+  }
+}

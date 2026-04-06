@@ -4,6 +4,7 @@
 목표는 세 가지다.
 
 - TL을 실제로 설치한다.
+- TL local plugin/MCP tool까지 붙인다.
 - 기존 Codex hook 환경을 망가뜨리지 않는다.
 - repo가 아직 로컬에 없어도 시작 지점이 분명해야 한다.
 
@@ -12,7 +13,7 @@
 ### repo가 아직 없다
 
 ```bash
-codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely. If https://github.com/flowkater/tl is not cloned locally yet, clone it first."
+codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely. Do not clone the repository unless you actually need a local checkout."
 ```
 
 ### repo는 이미 있다
@@ -41,9 +42,10 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 다음 원칙을 지켜라.
 
-원칙 1. repository가 로컬에 없으면 먼저 clone하고, 있으면 그 경로를 그대로 사용한다.
-- 기본 clone 경로는 ~/Projects/TL 로 둔다.
-- 이미 clone돼 있으면 새로 중복 clone하지 말고 기존 경로를 재사용한다.
+원칙 1. 기본 경로는 clone 없는 전역 설치다.
+- 먼저 `npm install -g github:flowkater/tl`로 설치한다.
+- local plugin 설치는 `tl plugin install`로 처리한다.
+- source checkout이 꼭 필요할 때만 clone한다.
 
 원칙 2. 기존 Codex hook 환경을 망가뜨리지 마라.
 - `~/.codex/hooks.json`이 없으면 TL hook를 설치한다.
@@ -65,16 +67,13 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 아래 순서대로 수행하라.
 
-1. repository 준비
-- TL이 설치돼 있지 않고 repo도 없으면 `git clone https://github.com/flowkater/tl.git ~/Projects/TL`
-- 작업 경로를 고정한다.
-
-2. 설치
-- `npm install`
-- `npm run build`
-- `npm run test`
-- `npm install -g .`
+1. 설치
+- `npm install -g github:flowkater/tl`
 - `tl help`
+
+2. local plugin 설치
+- `tl plugin install`
+- `tl plugin status`
 
 3. Codex hook 기능 확인
 - `~/.codex/config.toml`을 확인한다.
@@ -103,6 +102,7 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 7. 검증
 - `tl help`
+- `tl plugin status`
 - `tl status`
 - `cat ~/.codex/config.toml`
 - `cat ~/.codex/hooks.json`
@@ -114,6 +114,7 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 8. 사용자에게 꼭 알려야 할 점
 - TL은 Topics-enabled Telegram group/supergroup 기준이다
+- TL plugin은 `~/plugins/tl-tools`와 `~/.agents/plugins/marketplace.json`에 설치된다
 - subagent `SessionStart`는 무시된다
 - topic 안에서는 일반 메시지도 `thread_id` 기준으로 라우팅된다
 - `All` 뷰처럼 `thread_id`가 없으면 `Reply`가 필요하다
@@ -135,4 +136,5 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 - 이 프롬프트는 `PROMPTS.md`라는 파일명만 말하는 대신, GitHub URL을 직접 가리키는 흐름을 전제로 쓴다.
 - TL의 기본 설치는 이제 `tl init`/`tl setup` 기준 safe merge를 사용한다.
+- TL plugin은 repo clone 없이 `tl plugin install`로 붙일 수 있다.
 - 다만 기존 router/wrapper가 TL을 간접 호출하는 환경은 자동 병합보다 검증 우선이 더 안전하다.

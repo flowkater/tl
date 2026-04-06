@@ -1,0 +1,40 @@
+{
+  "name": "tl-tools",
+  "version": "0.1.0",
+  "description": "Local TL tools for Codex",
+  "author": {
+    "name": "flowkater",
+    "url": "https://github.com/flowkater"
+  },
+  "homepage": "https://github.com/flowkater/tl",
+  "repository": "https://github.com/flowkater/tl",
+  "license": "MIT",
+  "keywords": [
+    "tl",
+    "telegram",
+    "codex",
+    "mcp"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TL Tools",
+    "shortDescription": "Run TL daemon, session, and config tools from Codex",
+    "longDescription": "Expose TL daemon status, session listing, resume, and config management as a local Codex MCP plugin.",
+    "developerName": "flowkater",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/flowkater/tl",
+    "privacyPolicyURL": "https://github.com/flowkater/tl",
+    "termsOfServiceURL": "https://github.com/flowkater/tl",
+    "defaultPrompt": [
+      "Check TL daemon and session status",
+      "Resume the latest waiting TL session",
+      "Update TL config values safely"
+    ],
+    "brandColor": "#2563EB",
+    "screenshots": []
+  }
+}

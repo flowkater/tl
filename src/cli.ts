@@ -21,6 +21,7 @@ import {
   SessionStartPayload,
   UserPromptSubmitPayload,
 } from './types.js';
+import { PluginInstaller } from './plugin-installer.js';
 
 function getConfigDir(): string {
   return process.env.TL_CONFIG_DIR || path.join(os.homedir(), '.tl');
@@ -57,6 +58,8 @@ async function main() {
       return cmdInit();
     case 'config':
       return cmdConfig(args);
+    case 'plugin':
+      return cmdPlugin(args);
     case 'hook-session-start':
       return cmdHookSessionStart();
     case 'hook-stop-and-wait':
@@ -491,6 +494,30 @@ function cmdConfig(args: string[]) {
   console.log('Usage: tl config get [KEY] | tl config set KEY=VALUE');
 }
 
+async function cmdPlugin(args: string[]) {
+  const subcommand = args[0];
+  const installer = new PluginInstaller({
+    nodeBinary: process.execPath,
+    cliScriptPath: path.join(getProjectRoot(), 'dist', 'cli.js'),
+    mcpServerPath: path.join(getProjectRoot(), 'dist', 'tl-mcp-server.js'),
+  });
+
+  if (subcommand === 'install') {
+    const result = await installer.install();
+    console.log(`TL plugin installed at ${result.pluginPath}`);
+    console.log(`Marketplace updated at ${result.marketplacePath}`);
+    return;
+  }
+
+  if (subcommand === 'status') {
+    const status = await installer.status();
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  console.log('Usage: tl plugin install | tl plugin status');
+}
+
 // ===== tl hook-session-start =====
 async function cmdHookSessionStart() {
   const configPath = path.join(getConfigDir(), 'config.json');
@@ -684,6 +711,8 @@ Usage:
   tl init [--force]            Merge TL hooks into ~/.codex/hooks.json (overwrite only with --force)
   tl config get [KEY]          Show config
   tl config set KEY=VALUE      Set config value
+  tl plugin install            Install the local Codex TL plugin
+  tl plugin status             Show the local Codex TL plugin status
   tl help                      Show this help
 
 Internal (used by Codex hooks):
