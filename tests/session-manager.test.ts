@@ -165,6 +165,27 @@ describe('SessionManagerImpl', () => {
       expect(tg.sendStartMessage).toHaveBeenCalled();
     });
 
+    it('auto-attaches remote metadata when session start includes a remote endpoint', async () => {
+      await manager.handleSessionStart({
+        session_id: 'remote-thread-1',
+        model: 'gpt-4',
+        turn_id: 't1',
+        project: 'myproj',
+        cwd: '/tmp/myproj',
+        last_user_message: 'hello',
+        remote_endpoint: 'ws://127.0.0.1:8899',
+      });
+
+      expect(store.create).toHaveBeenCalledWith(
+        'remote-thread-1',
+        expect.objectContaining({
+          remote_mode_enabled: true,
+          remote_endpoint: 'ws://127.0.0.1:8899',
+          remote_thread_id: 'remote-thread-1',
+        })
+      );
+    });
+
     it('does not create a session record if the start message fails', async () => {
       tg.sendStartMessage.mockRejectedValueOnce(new Error('telegram down'));
 

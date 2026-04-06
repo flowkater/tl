@@ -348,7 +348,7 @@ export class TlE2EHarness {
     });
   }
 
-  spawnCli(args: string[], stdin: string) {
+  spawnCli(args: string[], stdin: string, extraEnv: Record<string, string> = {}) {
     const child = spawn(
       process.execPath,
       [tsxCliPath(), path.join(repoRoot(), 'src', 'cli.ts'), ...args],
@@ -358,6 +358,7 @@ export class TlE2EHarness {
           ...process.env,
           TL_CONFIG_DIR: this.configDir,
           TL_DATA_DIR: this.dataDir,
+          ...extraEnv,
         },
         stdio: 'pipe',
       }
@@ -392,8 +393,12 @@ export class TlE2EHarness {
     };
   }
 
-  async runCli(args: string[], stdin: string): Promise<CliResult> {
-    const handle = this.spawnCli(args, stdin);
+  async runCli(
+    args: string[],
+    stdin: string,
+    extraEnv: Record<string, string> = {}
+  ): Promise<CliResult> {
+    const handle = this.spawnCli(args, stdin, extraEnv);
     return handle.waitForExit();
   }
 

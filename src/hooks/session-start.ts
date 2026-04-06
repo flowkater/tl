@@ -8,6 +8,7 @@ import {
   isReconnectSessionStart,
   isSubagentSessionStart,
 } from '../session-start-filter.js';
+import { resolveRemoteEndpoint } from '../remote-endpoint-discovery.js';
 import { SessionStartPayload } from '../types.js';
 
 function getConfigDir(): string {
@@ -16,6 +17,8 @@ function getConfigDir(): string {
 
 async function main() {
   const configPath = path.join(getConfigDir(), 'config.json');
+  const remoteEndpoint = resolveRemoteEndpoint();
+  const remoteThreadId = process.env.TL_REMOTE_THREAD_ID?.trim() || null;
   let port = 9877;
   if (fs.existsSync(configPath)) {
     try {
@@ -42,6 +45,8 @@ async function main() {
       body: JSON.stringify({
         ...payload,
         is_reconnect: isReconnectSessionStart(payload),
+        remote_endpoint: remoteEndpoint,
+        remote_thread_id: remoteThreadId,
       }),
     });
 

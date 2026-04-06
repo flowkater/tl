@@ -299,15 +299,34 @@ source checkout이 꼭 필요한 경우에만, 그 사실을 별도로 명시해
 
 - `codex app-server --listen ws://127.0.0.1:<port>`
 - Codex TUI를 `codex --remote ws://127.0.0.1:<port>`로 시작
-- TL 세션을 해당 thread에 수동 attach
+- 실험용 hook wrapper를 통해 SessionStart에서 remote endpoint를 주입
 
-attach 예시:
+권장 흐름:
 
 ```bash
-tl remote attach 019d5db1-e768-7913-8fad-195cc5266e6a \
-  --thread 019d6300-aaaa-bbbb-cccc-1234567890ab \
-  --endpoint ws://127.0.0.1:8791
-tl remote status 019d5db1-e768-7913-8fad-195cc5266e6a
+tl remote enable --endpoint ws://127.0.0.1:8791
+codex app-server --listen ws://127.0.0.1:8791
+codex --remote ws://127.0.0.1:8791 --dangerously-bypass-approvals-and-sandbox
+```
+
+이 모드에서는 새 SessionStart가 자동으로 `remote_mode_enabled=true`, `remote_thread_id=session_id`로 기록된다. 검증은 아래처럼 한다.
+
+```bash
+tl remote status
+tl remote inject <session_id> --text "Reply with REMOTE-SMOKE and then stop again."
+```
+
+실험 종료 후에는 일반 local mode로 복구한다.
+
+```bash
+tl remote disable
+```
+
+수동 attach는 여전히 가능하다.
+
+```bash
+tl remote attach <session_id> --thread <thread_id> --endpoint ws://127.0.0.1:8791
+tl remote status <session_id>
 ```
 
 현재 remote recovery 순서:

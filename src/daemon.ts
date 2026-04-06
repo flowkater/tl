@@ -23,6 +23,7 @@ type DaemonAppDeps = {
   store: SessionsStore;
   replyQueue: ReplyQueue;
   sessionManager: SessionManagerImpl;
+  remoteStopController?: RemoteStopController;
 };
 
 function getPidPath(): string {
@@ -76,6 +77,7 @@ export function createDaemonApp({
   store,
   replyQueue,
   sessionManager,
+  remoteStopController,
 }: DaemonAppDeps): Hono {
   const app = new Hono();
 
@@ -103,6 +105,8 @@ export function createDaemonApp({
         cwd: body.cwd ?? process.cwd(),
         last_user_message: body.last_user_message ?? '',
         is_reconnect: isReconnect,
+        remote_endpoint: body.remote_endpoint ?? null,
+        remote_thread_id: body.remote_thread_id ?? null,
       });
       await store.save();
 
@@ -315,6 +319,34 @@ export function createDaemonApp({
       session_id: body.session_id,
       remote_mode_enabled: false,
     });
+  });
+
+  // ===== POST /remote/inject =====
+  app.post('/remote/inject', async (c) => {
+    if (!remoteStopController) {
+      return c.json({ error: 'Remote stop controller unavailable' }, 503);
+    }
+
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.session_id || !body.reply_text) {
+      return c.json({ error: 'Missing session_id or reply_text' }, 400);
+    }
+
+    try {
+      const result = await remoteStopController.handleReply(
+        body.session_id,
+        body.reply_text
+      );
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
   });
 
   // ===== GET /remote/status =====
@@ -534,7 +566,12 @@ async function main() {
     return result.handled;
   });
 
-  const app = createDaemonApp({ store, replyQueue, sessionManager });
+  const app = createDaemonApp({
+    store,
+    replyQueue,
+    sessionManager,
+    remoteStopController,
+  });
 
   // HTTP 서버 시작
   const server = serve(

@@ -54,6 +54,8 @@ export interface SessionStartPayload {
   cwd: string;
   transcript_path: string;
   source: string;
+  remote_endpoint?: string;
+  remote_thread_id?: string;
 }
 
 export interface StopPayload {
@@ -90,6 +92,8 @@ export interface SessionManager {
     cwd: string;
     last_user_message: string;
     is_reconnect?: boolean;
+    remote_endpoint?: string | null;
+    remote_thread_id?: string | null;
   }): Promise<void>;
 
   handleStopAndWait(args: {
@@ -125,6 +129,7 @@ export interface DaemonConfig {
   stopTimeout: number;         // 기본: 7200 (초)
   liveStream: boolean;         // 기본: false
   emojiReaction: string;       // 기본: '👍'
+  remoteCodexEndpoint?: string | null; // experimental remote app-server endpoint
 }
 
 // ===== HTTP 응답 타입 =====

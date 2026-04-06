@@ -10,12 +10,18 @@ import readline from 'readline';
 import { serializeStopHookOutput } from './stop-hook-output.js';
 import {
   createTlHooksTemplate,
+  disableRemoteSessionStartHook,
+  enableRemoteSessionStartHook,
   ensureTlHooksInstalled,
+  TL_REMOTE_SESSION_START_WRAPPER_PATH,
+  writeRemoteSessionStartWrapper,
 } from './codex-hooks.js';
+import { loadConfig, saveConfig } from './config.js';
 import {
   isReconnectSessionStart,
   isSubagentSessionStart,
 } from './session-start-filter.js';
+import { resolveRemoteEndpoint } from './remote-endpoint-discovery.js';
 import {
   HookOutput,
   SessionStartPayload,
@@ -35,6 +41,10 @@ function getProjectRoot(): string {
   // dist/cli.js → /Users/.../TL/dist/cli.js → dirname → /Users/.../TL/dist → dirname → /Users/.../TL
   const distDir = path.dirname(new URL(import.meta.url).pathname);
   return path.resolve(distDir, '..');
+}
+
+function getHooksPath(): string {
+  return path.join(os.homedir(), '.codex', 'hooks.json');
 }
 
 function getHookPort(): number {
@@ -517,19 +527,74 @@ async function cmdPlugin(args: string[]) {
 
 async function cmdRemote(args: string[]) {
   const subcommand = args[0];
+  if (subcommand === 'enable') {
+    return cmdRemoteEnable(args.slice(1));
+  }
+  if (subcommand === 'disable') {
+    return cmdRemoteDisable();
+  }
   if (subcommand === 'attach') {
     return cmdRemoteAttach(args.slice(1));
   }
   if (subcommand === 'detach') {
     return cmdRemoteDetach(args.slice(1));
   }
+  if (subcommand === 'inject') {
+    return cmdRemoteInject(args.slice(1));
+  }
   if (subcommand === 'status') {
     return cmdRemoteStatus(args.slice(1));
   }
 
-  console.log('Usage: tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>');
+  console.log('Usage: tl remote enable --endpoint <ws-url>');
+  console.log('       tl remote disable');
+  console.log('       tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>');
   console.log('       tl remote detach <session_id>');
+  console.log('       tl remote inject <session_id> --text <message>');
   console.log('       tl remote status [session_id]');
+}
+
+async function cmdRemoteEnable(args: string[]) {
+  let endpoint = '';
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--endpoint') {
+      endpoint = args[i + 1] ?? '';
+      i += 1;
+    }
+  }
+
+  if (!endpoint) {
+    process.stderr.write('Usage: tl remote enable --endpoint <ws-url>\n');
+    process.exit(1);
+  }
+
+  saveConfig({ remoteCodexEndpoint: endpoint });
+  const wrapperPath = writeRemoteSessionStartWrapper(endpoint);
+  const hookResult = enableRemoteSessionStartHook(getHooksPath(), wrapperPath);
+
+  console.log(JSON.stringify({
+    status: 'enabled',
+    endpoint,
+    wrapper_path: wrapperPath,
+    hooks_path: hookResult.targetPath,
+    backup_path: hookResult.backupPath ?? null,
+    session_start_command: hookResult.sessionStartCommand,
+  }, null, 2));
+}
+
+async function cmdRemoteDisable() {
+  saveConfig({ remoteCodexEndpoint: null });
+  const hookResult = disableRemoteSessionStartHook(getHooksPath());
+
+  console.log(JSON.stringify({
+    status: 'disabled',
+    endpoint: null,
+    wrapper_path: TL_REMOTE_SESSION_START_WRAPPER_PATH,
+    hooks_path: hookResult.targetPath,
+    backup_path: hookResult.backupPath ?? null,
+    session_start_command: hookResult.sessionStartCommand,
+  }, null, 2));
 }
 
 async function cmdRemoteAttach(args: string[]) {
@@ -607,6 +672,42 @@ async function cmdRemoteDetach(args: string[]) {
 }
 
 async function cmdRemoteStatus(args: string[]) {
+  if (!args[0]) {
+    const config = loadConfig();
+    const hooksPath = getHooksPath();
+    let sessionStartCommand: string | null = null;
+
+    if (fs.existsSync(hooksPath)) {
+      try {
+        const hooksFile = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+        const matcher = hooksFile?.hooks?.SessionStart?.find?.((entry: any) =>
+          Array.isArray(entry?.hooks) &&
+          entry.hooks.some((hook: any) => hook?.type === 'command')
+        );
+        const hook = matcher?.hooks?.find?.((entry: any) => entry?.type === 'command');
+        sessionStartCommand = hook?.command ?? null;
+      } catch {
+        sessionStartCommand = null;
+      }
+    }
+
+    const url = new URL(`http://localhost:${getHookPort()}/remote/status`);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) {
+      process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+      process.exit(1);
+    }
+
+    console.log(JSON.stringify({
+      configured_endpoint: config.remoteCodexEndpoint ?? null,
+      wrapper_path: TL_REMOTE_SESSION_START_WRAPPER_PATH,
+      session_start_command: sessionStartCommand,
+      attached_sessions: data.sessions ?? [],
+    }, null, 2));
+    return;
+  }
+
   const sessionId = args[0];
   const url = new URL(`http://localhost:${getHookPort()}/remote/status`);
   if (sessionId) {
@@ -623,9 +724,49 @@ async function cmdRemoteStatus(args: string[]) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdRemoteInject(args: string[]) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    process.stderr.write('Usage: tl remote inject <session_id> --text <message>\n');
+    process.exit(1);
+  }
+
+  let text = '';
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--text') {
+      text = args[i + 1] ?? '';
+      i += 1;
+    }
+  }
+
+  if (!text) {
+    process.stderr.write('Usage: tl remote inject <session_id> --text <message>\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/remote/inject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      reply_text: text,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
 // ===== tl hook-session-start =====
 async function cmdHookSessionStart() {
   const port = getHookPort();
+  const remoteEndpoint = resolveRemoteEndpoint();
+  const remoteThreadId = process.env.TL_REMOTE_THREAD_ID?.trim() || null;
 
   const stdin = fs.readFileSync(0, 'utf-8');
   if (!stdin.trim()) {
@@ -645,6 +786,8 @@ async function cmdHookSessionStart() {
       body: JSON.stringify({
         ...payload,
         is_reconnect: isReconnectSessionStart(payload),
+        remote_endpoint: remoteEndpoint,
+        remote_thread_id: remoteThreadId,
       }),
     });
 
@@ -800,8 +943,11 @@ Usage:
   tl config set KEY=VALUE      Set config value
   tl plugin install            Install the local Codex TL plugin
   tl plugin status             Show the local Codex TL plugin status
+  tl remote enable ...         Enable experimental remote app-server mode
+  tl remote disable            Disable experimental remote app-server mode
   tl remote attach ...         Attach a TL session to a Codex app-server thread
   tl remote detach <session_id>  Remove remote attachment from a TL session
+  tl remote inject ...         Inject a reply into a remote-attached session
   tl remote status [session_id]  Show remote attachment status
   tl help                      Show this help
 

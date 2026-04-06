@@ -88,6 +88,34 @@ describe.sequential('TL CLI + daemon E2E', () => {
     }
   });
 
+  it('auto-attaches remote metadata when TL_REMOTE_ENDPOINT is set for hook-session-start', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      const transcriptPath = harness.writeTranscript([
+        ['user', 'remote auto attach'],
+        ['final', 'ready'],
+      ]);
+
+      const start = await harness.runCli(
+        ['hook-session-start'],
+        harness.sessionStartPayload('remote-s1', transcriptPath),
+        {
+          TL_REMOTE_ENDPOINT: 'ws://127.0.0.1:8899',
+        }
+      );
+      expect(start.code).toBe(0);
+
+      await vi.waitFor(() => {
+        const session = harness.store.get('remote-s1')?.record;
+        expect(session?.remote_mode_enabled).toBe(true);
+        expect(session?.remote_endpoint).toBe('ws://127.0.0.1:8899');
+        expect(session?.remote_thread_id).toBe('remote-s1');
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('returns continue when stop wait times out and restores the session to active', async () => {
     const harness = await TlE2EHarness.create({ stopTimeout: 1 });
     try {

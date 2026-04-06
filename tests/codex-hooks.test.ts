@@ -3,9 +3,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
+  disableRemoteSessionStartHook,
+  enableRemoteSessionStartHook,
   ensureTlHooksInstalled,
+  TL_REMOTE_SESSION_START_WRAPPER_PATH,
+  createRemoteSessionStartHook,
   TL_SESSION_START_HOOK,
   TL_STOP_HOOK,
+  writeRemoteSessionStartWrapper,
 } from '../src/codex-hooks.js';
 
 function makeTestDir(): string {
@@ -102,5 +107,86 @@ describe('codex hooks installer', () => {
       TL_STOP_HOOK.command,
     ]);
     expect(result.commandsInstalled).toEqual([]);
+  });
+
+  it('switches SessionStart to the remote wrapper command when remote mode is enabled', () => {
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [{ hooks: [TL_SESSION_START_HOOK] }],
+            Stop: [{ hooks: [TL_STOP_HOOK] }],
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const wrapperPath = path.join(testDir, 'tl-remote-session-start.sh');
+    writeRemoteSessionStartWrapper('ws://127.0.0.1:8795', wrapperPath);
+    const result = enableRemoteSessionStartHook(hooksPath, wrapperPath);
+
+    expect(result.remoteEnabled).toBe(true);
+    expect(result.sessionStartCommand).toBe(wrapperPath);
+    expect(fs.readFileSync(wrapperPath, 'utf-8')).toContain("TL_REMOTE_ENDPOINT='ws://127.0.0.1:8795'");
+
+    const saved = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    expect(saved.hooks.SessionStart[0].hooks[0]).toEqual(
+      createRemoteSessionStartHook(wrapperPath)
+    );
+  });
+
+  it('restores the plain TL SessionStart command when remote mode is disabled', () => {
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [{ hooks: [createRemoteSessionStartHook(TL_REMOTE_SESSION_START_WRAPPER_PATH)] }],
+            Stop: [{ hooks: [TL_STOP_HOOK] }],
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const result = disableRemoteSessionStartHook(hooksPath);
+
+    expect(result.remoteEnabled).toBe(false);
+    expect(result.sessionStartCommand).toBe(TL_SESSION_START_HOOK.command);
+
+    const saved = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    expect(saved.hooks.SessionStart[0].hooks[0]).toEqual(TL_SESSION_START_HOOK);
+  });
+
+  it('deduplicates repeated TL SessionStart hooks while preserving one command', () => {
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              { hooks: [TL_SESSION_START_HOOK] },
+              { hooks: [createRemoteSessionStartHook(TL_REMOTE_SESSION_START_WRAPPER_PATH)] },
+              { hooks: [TL_SESSION_START_HOOK] },
+            ],
+            Stop: [{ hooks: [TL_STOP_HOOK] }],
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const result = disableRemoteSessionStartHook(hooksPath);
+
+    expect(result.changed).toBe(true);
+
+    const saved = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    expect(saved.hooks.SessionStart).toHaveLength(1);
+    expect(saved.hooks.SessionStart[0].hooks).toEqual([TL_SESSION_START_HOOK]);
   });
 });

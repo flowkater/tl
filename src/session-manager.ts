@@ -41,8 +41,21 @@ export class SessionManagerImpl implements SessionManager {
     cwd: string;
     last_user_message: string;
     is_reconnect?: boolean;
+    remote_endpoint?: string | null;
+    remote_thread_id?: string | null;
   }): Promise<void> {
-    const { session_id, model, project, is_reconnect } = args;
+    const {
+      session_id,
+      model,
+      project,
+      is_reconnect,
+      remote_endpoint,
+      remote_thread_id,
+    } = args;
+    const remoteEnabled = typeof remote_endpoint === 'string' && remote_endpoint.length > 0;
+    const resolvedRemoteThreadId = remoteEnabled
+      ? (remote_thread_id && remote_thread_id.length > 0 ? remote_thread_id : session_id)
+      : null;
 
     // 상태 검증
     const existing = this.store.get(session_id);
@@ -80,6 +93,11 @@ export class SessionManagerImpl implements SessionManager {
         record.late_reply_received_at = null;
         record.late_reply_resume_started_at = null;
         record.late_reply_resume_error = null;
+        record.remote_mode_enabled = remoteEnabled || record.remote_mode_enabled;
+        record.remote_endpoint = remoteEnabled ? remote_endpoint : record.remote_endpoint;
+        record.remote_thread_id = remoteEnabled
+          ? resolvedRemoteThreadId
+          : record.remote_thread_id;
         record.remote_last_injection_error = null;
         record.remote_last_resume_at = null;
         record.remote_last_resume_error = null;
@@ -116,9 +134,9 @@ export class SessionManagerImpl implements SessionManager {
         late_reply_received_at: null,
         late_reply_resume_started_at: null,
         late_reply_resume_error: null,
-        remote_mode_enabled: false,
-        remote_endpoint: null,
-        remote_thread_id: null,
+        remote_mode_enabled: remoteEnabled,
+        remote_endpoint: remoteEnabled ? remote_endpoint : null,
+        remote_thread_id: resolvedRemoteThreadId,
         remote_last_turn_id: null,
         remote_last_injection_at: null,
         remote_last_injection_error: null,

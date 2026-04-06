@@ -13,6 +13,7 @@ const DEFAULT_CONFIG: DaemonConfig = {
   stopTimeout: 7200,
   liveStream: false,
   emojiReaction: '👍',
+  remoteCodexEndpoint: null,
 };
 
 export function getConfigDir(): string {
@@ -72,6 +73,16 @@ export function loadConfig(): DaemonConfig {
   }
   if (typeof config.emojiReaction !== 'string' || config.emojiReaction.trim() === '') {
     throw new TlError('emojiReaction must be a non-empty string', 'CONFIG_INVALID');
+  }
+  if (
+    config.remoteCodexEndpoint !== null &&
+    config.remoteCodexEndpoint !== undefined &&
+    (typeof config.remoteCodexEndpoint !== 'string' || config.remoteCodexEndpoint.trim() === '')
+  ) {
+    throw new TlError(
+      'remoteCodexEndpoint must be null or a non-empty string',
+      'CONFIG_INVALID'
+    );
   }
 
   return config;

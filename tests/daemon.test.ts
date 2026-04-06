@@ -329,6 +329,43 @@ describe('daemon entrypoint', () => {
       attached: true,
     });
   });
+
+  it('routes remote inject requests through the remote stop controller', async () => {
+    const remoteStopController = {
+      handleReply: vi.fn().mockResolvedValue({
+        handled: true,
+        mode: 'remote',
+        turnId: 'turn-2',
+      }),
+    };
+
+    const app = createDaemonApp({
+      store: {} as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+      remoteStopController: remoteStopController as any,
+    });
+
+    const response = await app.request('http://localhost/remote/inject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: 's1',
+        reply_text: 'continue remotely',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+    expect(remoteStopController.handleReply).toHaveBeenCalledWith(
+      's1',
+      'continue remotely'
+    );
+  });
 });
 
 function makeDeferred() {
