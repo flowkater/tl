@@ -12,21 +12,21 @@
 ### repo가 아직 없다
 
 ```bash
-codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely. If https://github.com/tonyclaw/tl is not cloned locally yet, clone it first."
+codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely. If https://github.com/flowkater/tl is not cloned locally yet, clone it first."
 ```
 
 ### repo는 이미 있다
 
 ```bash
 cd ~/Projects/TL
-codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely"
+codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
 
 ### Telegram 자격증명까지 같이 넘긴다
 
 ```bash
 TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
-  codex exec --full-auto "Follow the instructions in https://github.com/tonyclaw/tl/blob/main/PROMPTS.md to install and configure TL safely"
+  codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
 
 ## Codex에게 전달할 프롬프트
@@ -36,8 +36,8 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 설명만 하지 말고, 가능한 범위까지 실제로 수행하라.
 
 반드시 아래 GitHub 기준으로 진행하라.
-- repository URL: https://github.com/tonyclaw/tl
-- install prompt source: https://github.com/tonyclaw/tl/blob/main/PROMPTS.md
+- repository URL: https://github.com/flowkater/tl
+- install prompt source: https://github.com/flowkater/tl/blob/main/PROMPTS.md
 
 다음 원칙을 지켜라.
 
@@ -66,7 +66,7 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 아래 순서대로 수행하라.
 
 1. repository 준비
-- TL이 설치돼 있지 않고 repo도 없으면 `git clone https://github.com/tonyclaw/tl.git ~/Projects/TL`
+- TL이 설치돼 있지 않고 repo도 없으면 `git clone https://github.com/flowkater/tl.git ~/Projects/TL`
 - 작업 경로를 고정한다.
 
 2. 설치
