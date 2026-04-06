@@ -1,5 +1,16 @@
 # tl — Codex ↔ Telegram Bridge
 
+> [!WARNING]
+> 이 문서는 초기 설계와 구현 전제 일부를 보존한 historical requirements다.
+> 현재 설치/운영 기준의 source of truth는 [README.md](../README.md), [CODEX_SETUP.md](../CODEX_SETUP.md), [PROMPTS.md](../PROMPTS.md)다.
+> 현재 구현과 다른 대표 차이:
+> - 기본 설치는 `npm install -g github:flowkater/tl`
+> - 기본 Stop timeout은 `7200`초
+> - local Codex plugin(`tl plugin install`)이 존재함
+> - Stop 메시지는 현재 turn의 `commentary + final`을 함께 전송함
+> - late reply resume fallback, resume ACK, working heartbeat가 구현돼 있음
+> - custom prompts / slash command 비교는 역사적 배경 설명일 뿐 현재 권장 경로가 아님
+
 > Codex 세션을 Telegram 토픽에 연결하여, 터미널과 텔레그램을 오가는 마찰을 없애는 로컬 개발 브릿지.
 >
 > **목표**: 터미널 안 봐도 됨. Codex가 작업하는 동안 텔레그램으로 확인하고, 답장만으로 개발 계속.
@@ -36,20 +47,17 @@
 
 ```
 1. Codex가 작업 완료 → Stop 훅 발동
-2. Stop 훅 명령어(tl-hook-wait)가 tl 데몬에게 신호
+2. Stop 훅 명령어(`tl hook-stop-and-wait`)가 tl 데몬에게 신호
    - session_id, turn_id, 마지막 assistant 메시지, cwd 전달
 3. tl 데몬이 TG 토픽으로 메시지 전송:
    ┌─────────────────────────────────────┐
    │ ✅ 작업 완료                        │
    │                                     │
-   │ "auth 모듈에 에러 핸들링 추가했어.  │
-   │  3개 파일 수정, 테스트 12/12 PASS   │
-   │                                     │
-   │  다음에는 뭘 할까?"                │
+   │ "commentary + final 요약 본문"      │
    └─────────────────────────────────────┘
-4. tl-hook-wait은 TG 답장 올 때까지 블로킹 대기 (timeout 1시간)
+4. `tl hook-stop-and-wait`는 TG 답장 올 때까지 블로킹 대기 (현재 기본 timeout 2시간)
 5. 유저가 TG 토픽에서 답장 (Reply)
-6. tl 데몬이 reply를 tl-hook-wait에게 전달 → 후크 exit 0
+6. tl 데몬이 reply를 `tl hook-stop-and-wait`에게 전달 → 후크 exit 0
 7. Codex가 답장을 새 입력으로 받아 개발 계속
 8. tl 데몬이 TG 답장 메시지에 👍 이모지 반응
 ```
@@ -118,8 +126,8 @@ codex_hooks = true
         "hooks": [
           {
             "type": "command",
-            "command": "tl-hook-wait",
-            "timeout": 3600
+            "command": "tl hook-stop-and-wait",
+            "timeout": 7200
           }
         ]
       }
@@ -280,8 +288,6 @@ tl config set GROUP_ID=<id>      # TG Group ID 설정
 auth 모듈에 에러 핸들링 추가했어.
 수정: AuthService.ts, AuthGuard.ts, api.test.ts
 테스트: 12/12 PASS
-
-다음에는 뭘 할까?
 ```
 
 **세션 시작:**
@@ -306,7 +312,7 @@ session: abc123
   "groupId": -1001234567890,
   "topicPrefix": "🔧",                    // 토픽명 프리픽스
   "hookPort": 9877,                       // 데몬 HTTP 포트
-  "stopTimeout": 3600,                    // Stop 훅 대기 타임아웃 (초)
+  "stopTimeout": 7200,                    // Stop 훅 대기 타임아웃 (초)
   "liveStream": false,                    // 실시간 로그 스트리밍 (선택)
   "emojiReaction": "👍"                   // 답장 확인 이모지
 }
@@ -318,9 +324,11 @@ session: abc123
 
 ### 5.1 커스텀 슬래시 커맨드 vs 자동 연결
 
+이 절은 당시 비교 기준을 남긴 기록이다. 현재 권장 경로는 훅 기반 자동 연결 + optional local plugin이다.
+
 **결정: 자동 연결 (SessionStart 훅)**
 
-- Codex의 커스텀 프롬프트(deprecated) + 스킬은 `/prompts:tl` 형식이지만, 유저가 매번 입력해야 함
+- 당시 Codex의 커스텀 프롬프트(deprecated) + 스킬은 `/prompts:tl` 형식이었고, 유저가 매번 입력해야 했음
 - `SessionStart` 훅이 세션 시작 시 **자동 발동** → `/tl` 입력 불필요
 - Codex 켜는 것만으로 TG 연결 완료 = 마찰 0
 
@@ -344,19 +352,19 @@ session: abc123
 
 **원칙: Codex 프로세스가 살아있는 한 연결 유지**
 
-- Stop 훅은 매 턴 종료 시 발동 → tl-hook-wait이 블로킹 대기
+- Stop 훅은 매 턴 종료 시 발동 → `tl hook-stop-and-wait`가 블로킹 대기
 - 답장 받으면 exit 0 → Codex 계속 → 다음 턴 → 다시 Stop 훅
-- 무한 루프 구조 (timeout 1시간 안전장치)
+- 무한 루프 구조 (현재 기본 timeout 2시간 안전장치)
 
 ---
 
-## 6. 개발 단계
+## 6. 초기 개발 단계 기록
 
 ### Phase 1: PoC (1일)
 - [ ] 단일 세션, 단일 턹
 - [ ] SessionStart 훅 → 콘솔 로그
 - [ ] Stop 훅 → 콘솔에 마지막 메시지 출력
-- [ ] tl-hook-wait이 stdin으로 답장 받아 exit 0
+- [ ] `tl hook-stop-and-wait`가 stdin으로 답장 받아 exit 0
 
 ### Phase 2: TG 연동 (1-2일)
 - [ ] grammY 봇 설정
@@ -387,11 +395,11 @@ session: abc123
 
 | 리스크 | 영향 | 해결 |
 |--------|------|------|
-| Stop 훅 timeout 초과 (1시간 무응답) | 세션 정지 | `continue: false`로 graceful stop + TG 알림 |
+| Stop 훅 timeout 초과 (2시간 무응답) | 세션 정지 | `continue: false`로 graceful stop + TG 알림 |
 | 데몬 크래 시 reply 손실 | 답장 유실 | reply를 파일 큐에 저장 → 데몬 재시작 시 처리 |
 | topic_id 변경 (TG 그룹 설정 변경) | 매핑 깨짐 | sessions.json에 chat_id + topic_id 이중 저장 |
 | Codex 훅 버전 변경 | 훅 스키마 변경 | hooks.json 버전 관리 + 마이그레이션 스크립트 |
-| 훅 프로세스가 Codex를 블로킹 | 개발 지연 | tl-hook-wait은 lightweight, HTTP 신호만 보내고 poll |
+| 훅 프로세스가 Codex를 블로킹 | 개발 지연 | `tl hook-stop-and-wait`는 lightweight, HTTP 신호만 보내고 poll |
 
 ---
 
@@ -409,8 +417,8 @@ session: abc123
 ## 9. 참고
 
 - [Codex Hooks 공식 문서](https://developers.openai.com/codex/hooks)
-- [Codex CLI Slash Commands](https://developers.openai.com/codex/cli/slash-commands)
-- [Codex Custom Prompts (deprecated)](https://developers.openai.com/codex/custom-prompts)
+- [Codex CLI Slash Commands](https://developers.openai.com/codex/cli/slash-commands) - 당시 비교 배경
+- [Codex Custom Prompts (deprecated)](https://developers.openai.com/codex/custom-prompts) - 역사적 배경
 - [Codex Skills (후속)](https://developers.openai.com/codex/skills)
 - [Codex Config Reference](https://developers.openai.com/codex/config-reference)
 

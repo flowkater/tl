@@ -30,6 +30,19 @@ tl plugin install
 tl plugin status
 ```
 
+TL 자체를 수정하거나 테스트해야 할 때만 source checkout을 받으면 된다.
+
+```bash
+git clone https://github.com/flowkater/tl.git ~/Projects/TL
+cd ~/Projects/TL
+npm install
+npm run build
+npm run test
+npm install -g .
+tl plugin install
+tl plugin status
+```
+
 plugin이 설치되면 Codex에서 아래 TL tool을 직접 사용할 수 있다.
 
 - `tl_status`
@@ -108,6 +121,7 @@ Telegram:
 - `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계까지 도달했을 때만 전송된다.
 - late reply는 `codex exec resume --dangerously-bypass-approvals-and-sandbox ...` fallback으로 이어질 수 있다.
 - `tl init --force`만 명시적 overwrite다. 기본 `tl init`과 `tl setup`은 safe merge다.
+- 기존 hook graph에 custom router/wrapper가 있으면 TL direct hook를 무조건 추가하지 말고, 최종 graph에서 TL이 이벤트당 정확히 1회만 남는지 먼저 확인하는 편이 안전하다.
 
 ## 문제 해결
 
@@ -119,11 +133,11 @@ Telegram:
 4. Topics가 켜져 있는지
 5. `/tl-status`가 응답하는지
 
-### 훅이 두 번 실행된다
+### 고급 환경에서 훅이 두 번 실행된다
 
-대부분 아래 둘 중 하나다.
+복잡한 Codex hook 환경에서는 아래 둘 중 하나가 원인인 경우가 많다.
 
-- TL direct hook와 router/wrapper 내부 TL 호출이 동시에 있음
+- TL direct hook와 기존 router/wrapper 내부 TL 호출이 동시에 있음
 - 같은 이벤트에 TL hook가 중복 병합됨
 
-최종 graph에서 TL은 `SessionStart` 1회, `Stop` 1회만 남겨야 한다.
+기본 설치 흐름에서는 `tl init`/`tl setup` safe merge만 쓰면 되지만, custom router/wrapper가 있는 환경은 최종 graph에서 TL이 `SessionStart` 1회, `Stop` 1회만 남도록 직접 검증하는 편이 안전하다.

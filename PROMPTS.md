@@ -1,12 +1,14 @@
 # TL 설치 프롬프트
 
 이 문서는 Codex에게 그대로 던질 수 있는 실행 프롬프트다.  
+기본 경로는 항상 GitHub URL 기반 전역 설치다.
+
 목표는 세 가지다.
 
 - TL을 실제로 설치한다.
 - TL local plugin/MCP tool까지 붙인다.
 - 기존 Codex hook 환경을 망가뜨리지 않는다.
-- repo가 아직 로컬에 없어도 시작 지점이 분명해야 한다.
+- repo가 없어도 바로 설치되고, 필요할 때만 source checkout을 받는다.
 
 ## 바로 쓰는 방법
 
@@ -14,13 +16,6 @@
 
 ```bash
 codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely. Do not clone the repository unless you actually need a local checkout."
-```
-
-### repo는 이미 있다
-
-```bash
-cd ~/Projects/TL
-codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
 
 ### Telegram 자격증명까지 같이 넘긴다
@@ -51,7 +46,6 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - `~/.codex/hooks.json`이 없으면 TL hook를 설치한다.
 - `~/.codex/hooks.json`이 있으면 안전 병합한다.
 - TL hook가 이미 있으면 중복 추가하지 않는다.
-- router/wrapper가 이미 TL을 내부에서 호출하면 direct TL hook를 또 추가하지 않는다.
 - `tl init --force`는 마지막 수단이다.
 
 원칙 3. TL hook는 최종 graph에서 이벤트당 정확히 한 번만 존재해야 한다.
@@ -83,10 +77,9 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 4. hook 전략 결정
 - `~/.codex/hooks.json`이 없으면 `tl init`
 - `~/.codex/hooks.json`이 있으면:
-  - TL direct hook가 이미 있는지 확인
-  - router/wrapper가 TL을 내부에서 호출하는지 확인
-  - direct TL hook가 없고 router/wrapper 중복도 아니면 `tl init`
-  - router/wrapper가 TL을 이미 호출하면 direct TL hook는 추가하지 말고, 현재 graph가 TL 1회만 포함하는지 검증만 한다
+  - TL hook가 이미 있는지 확인
+  - TL hook가 없으면 `tl init`
+  - custom router/wrapper가 있는 복잡한 환경이면 direct TL hook를 무조건 추가하지 말고, 최종 graph에서 TL이 이벤트당 정확히 1회만 존재하는지 먼저 검증한다
 - `tl init --force`는 overwrite이므로 명시적 필요가 있을 때만 사용한다
 
 5. TL 설정
@@ -137,4 +130,5 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - 이 프롬프트는 `PROMPTS.md`라는 파일명만 말하는 대신, GitHub URL을 직접 가리키는 흐름을 전제로 쓴다.
 - TL의 기본 설치는 이제 `tl init`/`tl setup` 기준 safe merge를 사용한다.
 - TL plugin은 repo clone 없이 `tl plugin install`로 붙일 수 있다.
-- 다만 기존 router/wrapper가 TL을 간접 호출하는 환경은 자동 병합보다 검증 우선이 더 안전하다.
+- source checkout은 TL 자체를 수정하거나 테스트해야 할 때만 필요하다.
+- custom router/wrapper가 TL을 간접 호출하는 고급 환경은 자동 병합보다 검증 우선이 더 안전하다.

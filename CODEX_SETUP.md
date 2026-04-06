@@ -5,9 +5,9 @@
 
 ## 0. 시작 경로 선택
 
-### A. repo가 아직 없다
+### A. 기본 설치
 
-설치만 필요하면:
+대부분은 source checkout 없이 여기까지만 하면 된다.
 
 ```bash
 npm install -g github:flowkater/tl
@@ -16,22 +16,10 @@ tl plugin install
 tl plugin status
 ```
 
-source도 같이 필요하면:
+### B. TL 자체를 수정하거나 테스트해야 할 때만 source checkout
 
 ```bash
 git clone https://github.com/flowkater/tl.git ~/Projects/TL
-cd ~/Projects/TL
-npm install
-npm run build
-npm run test
-npm install -g .
-tl plugin install
-tl plugin status
-```
-
-### B. repo는 있고 TL만 다시 맞추면 된다
-
-```bash
 cd ~/Projects/TL
 npm install
 npm run build
@@ -102,12 +90,12 @@ tl init
 
 ### 꼭 확인할 것
 
-1. direct TL hook가 이미 있는가
-2. 기존 router/wrapper가 TL을 내부에서 호출하는가
+1. TL hook가 이미 있는가
+2. custom router/wrapper가 TL을 내부에서 호출하는가
 
 운영 원칙:
 
-- TL direct hook와 router 내부 TL 호출을 동시에 두지 않는다
+- TL direct hook와 custom router 내부 TL 호출을 동시에 두지 않는다
 - 최종 graph에서 TL은 `SessionStart` 1회, `Stop` 1회만 남긴다
 
 ### TL 기본 hook 모양
@@ -250,12 +238,23 @@ Telegram:
 업데이트:
 
 ```bash
+npm install -g github:flowkater/tl
+tl plugin install
+tl stop
+tl start
+tl status
+```
+
+source checkout으로 TL 자체를 수정하는 경우에만 아래 경로를 사용한다.
+
+```bash
 cd ~/Projects/TL
 git pull
 npm install
 npm run build
 npm run test
 npm install -g .
+tl plugin install
 tl stop
 tl start
 tl status
@@ -283,15 +282,10 @@ tl status
 
 ## 10. Codex에게 맡기기
 
-repo가 이미 있으면:
-
-```bash
-cd ~/Projects/TL
-codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
-```
-
-repo가 아직 없으면:
+기본 경로는 항상 같다.
 
 ```bash
 codex exec --full-auto "Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md to install and configure TL safely"
 ```
+
+source checkout이 꼭 필요한 경우에만, 그 사실을 별도로 명시해서 Codex에게 맡긴다.
