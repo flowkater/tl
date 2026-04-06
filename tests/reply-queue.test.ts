@@ -48,9 +48,37 @@ describe('ReplyQueue', () => {
       expect(elapsed).toBeLessThan(1000);
     });
 
+    it('returns continue and clears pending when the waiting consumer aborts', async () => {
+      const controller = new AbortController();
+      const promise = queue.waitFor('s-abort', 10, {
+        signal: controller.signal,
+      });
+
+      controller.abort();
+
+      const result = await promise;
+      expect(result.decision).toBe('continue');
+
+      const delivered = queue.deliver('s-abort', 'late reply', {
+        queueIfMissing: false,
+      });
+      expect(delivered).toBe(false);
+    });
+
     it('returns continue when session is not pending', () => {
       const delivered = queue.deliver('nonexistent', 'orphan reply');
       expect(delivered).toBe(false);
+    });
+
+    it('does not create a file when queueIfMissing is false', () => {
+      const delivered = queue.deliver('nonexistent', 'orphan reply', {
+        queueIfMissing: false,
+      });
+      expect(delivered).toBe(false);
+
+      const queueDir = path.join(testDir, 'reply-queue');
+      const files = fs.readdirSync(queueDir).filter((f) => f.endsWith('.json'));
+      expect(files).toHaveLength(0);
     });
 
     it('only first deliver resolves, subsequent ones go to file', async () => {
@@ -72,6 +100,19 @@ describe('ReplyQueue', () => {
   });
 
   describe('file queue', () => {
+    it('delivers a pre-queued reply when waitFor starts later', async () => {
+      queue.deliver('s0', 'queued before wait');
+
+      const result = await queue.waitFor('s0', 1);
+
+      expect(result.decision).toBe('block');
+      expect(result.reason).toBe('queued before wait');
+
+      const queueDir = path.join(testDir, 'reply-queue');
+      const remaining = fs.readdirSync(queueDir).filter((f) => f.endsWith('.json'));
+      expect(remaining.length).toBe(0);
+    });
+
     it('processes file queue on restart', async () => {
       // pending consumer가 없는 상태에서 deliver → 파일 큐
       queue.deliver('s4', 'queued reply');

@@ -26,6 +26,13 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     total_turns: 0,
     last_user_message: '',
     last_turn_output: '',
+    last_progress_at: null,
+    last_heartbeat_at: null,
+    last_resume_ack_at: null,
+    late_reply_text: null,
+    late_reply_received_at: null,
+    late_reply_resume_started_at: null,
+    late_reply_resume_error: null,
     ...overrides,
   };
 }

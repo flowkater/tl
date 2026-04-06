@@ -4,6 +4,11 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import {
+  isReconnectSessionStart,
+  isSubagentSessionStart,
+} from '../session-start-filter.js';
+import { SessionStartPayload } from '../types.js';
 
 function getConfigDir(): string {
   return process.env.TL_CONFIG_DIR || path.join(os.homedir(), '.tl');
@@ -26,10 +31,18 @@ async function main() {
   }
 
   try {
+    const payload = JSON.parse(stdin) as SessionStartPayload;
+    if (isSubagentSessionStart(payload)) {
+      process.exit(0);
+    }
+
     const res = await fetch(`http://localhost:${port}/hook/session-start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: stdin,
+      body: JSON.stringify({
+        ...payload,
+        is_reconnect: isReconnectSessionStart(payload),
+      }),
     });
 
     const data = await res.json();

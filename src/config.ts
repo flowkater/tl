@@ -10,7 +10,7 @@ const DEFAULT_CONFIG: DaemonConfig = {
   topicPrefix: '🔧',
   hookPort: 9877,
   hookBaseUrl: 'http://localhost:9877',
-  stopTimeout: 3600,
+  stopTimeout: 7200,
   liveStream: false,
   emojiReaction: '👍',
 };

@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { loadConfig, getConfigDir } from './config.js';
@@ -5,10 +8,18 @@ import { SessionsStore } from './store.js';
 import { ReplyQueue } from './reply-queue.js';
 import { TelegramBot } from './telegram.js';
 import { SessionManagerImpl } from './session-manager.js';
-import { HookOutput, SessionStatus } from './types.js';
+import { LateReplyResumer } from './late-reply-resumer.js';
+import { HookOutput } from './types.js';
 import { logger } from './logger.js';
+import { buildStopMessageFromTranscript } from './assistant-turn-output.js';
 
 const startTime = Date.now();
+
+type DaemonAppDeps = {
+  store: SessionsStore;
+  replyQueue: ReplyQueue;
+  sessionManager: SessionManagerImpl;
+};
 
 function getPidPath(): string {
   return `${getConfigDir()}/daemon.pid`;
@@ -16,7 +27,6 @@ function getPidPath(): string {
 
 // ===== PID 관리 =====
 function acquirePidFile(): number | null {
-  const fs = require('fs');
   const pidPath = getPidPath();
   try {
     const fd = fs.openSync(pidPath, 'wx');
@@ -37,44 +47,32 @@ function acquirePidFile(): number | null {
 }
 
 function releasePidFile(): void {
-  const fs = require('fs');
   try { fs.unlinkSync(getPidPath()); } catch {}
 }
 
-// ===== 메인 =====
-async function main() {
-  const fs = require('fs');
+function runBackgroundTask(
+  name: string,
+  context: Record<string, unknown>,
+  task: () => Promise<void>
+): void {
+  void (async () => {
+    try {
+      await task();
+      logger.info(`${name} finished`, context);
+    } catch (err) {
+      logger.warn(`${name} failed`, {
+        ...context,
+        error: (err as Error).message,
+      });
+    }
+  })();
+}
 
-  // 설정 로드
-  const config = loadConfig();
-
-  // PID 파일
-  const existingPid = acquirePidFile();
-  if (existingPid !== null) {
-    logger.error(`Daemon already running (PID: ${existingPid})`);
-    process.exit(1);
-  }
-
-  // 저장소 초기화
-  const store = new SessionsStore();
-  await store.load();
-  logger.info('Sessions store loaded', {
-    sessionCount: store.listActive().length,
-  });
-
-  // Reply 큐 초기화
-  const replyQueue = new ReplyQueue();
-  replyQueue.startCleanupInterval();
-  await replyQueue.processFileQueue();
-
-  // Telegram 봇 초기화
-  const tg = new TelegramBot(config, store, replyQueue);
-  await tg.init();
-
-  // 세션 매니저 초기화
-  const sessionManager = new SessionManagerImpl(store, replyQueue, tg, config);
-
-  // Hono 앱
+export function createDaemonApp({
+  store,
+  replyQueue,
+  sessionManager,
+}: DaemonAppDeps): Hono {
   const app = new Hono();
 
   // ===== POST /hook/session-start =====
@@ -137,15 +135,38 @@ async function main() {
     }
 
     try {
+      const stopMessage = buildStopMessageFromTranscript(
+        body.transcript_path,
+        body.last_assistant_message ?? ''
+      );
       const output = await sessionManager.handleStopAndWait({
         session_id: body.session_id,
         turn_id: body.turn_id ?? '',
-        last_message: body.last_assistant_message ?? '',
+        last_message: stopMessage,
         total_turns: existing.record.total_turns + 1,
+        abort_signal: c.req.raw.signal,
       });
 
       // store는 sessionManager가 이미 업데이트함
       await store.save();
+
+      if (output.decision === 'block') {
+        runBackgroundTask(
+          'Resume ACK background task',
+          { session_id: body.session_id, source: 'stop-and-wait' },
+          async () => {
+            await sessionManager.handleResumeAcknowledged({
+              session_id: body.session_id,
+            });
+            await store.save();
+          }
+        );
+
+        return c.json({
+          ...output,
+          resume_ack_queued: true,
+        });
+      }
 
       return c.json(output);
     } catch (err) {
@@ -223,6 +244,62 @@ async function main() {
     return c.json({ status: 'resumed', session_id: body.session_id });
   });
 
+  // ===== POST /hook/resume-ack =====
+  app.post('/hook/resume-ack', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.session_id) {
+      return c.json({ error: 'Missing session_id' }, 400);
+    }
+
+    const existing = store.get(body.session_id);
+    if (!existing) {
+      return c.json({ status: 'ignored', reason: 'session not found' });
+    }
+
+    runBackgroundTask('Resume ACK background task', { session_id: body.session_id }, async () => {
+      await sessionManager.handleResumeAcknowledged({
+        session_id: body.session_id,
+      });
+      await store.save();
+    });
+
+    return c.json({ status: 'accepted', session_id: body.session_id }, 202);
+  });
+
+  // ===== POST /hook/working =====
+  app.post('/hook/working', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.session_id) {
+      return c.json({ error: 'Missing session_id' }, 400);
+    }
+
+    const existing = store.get(body.session_id);
+    if (!existing) {
+      return c.json({ status: 'ignored', reason: 'session not found' });
+    }
+
+    runBackgroundTask('Working hook background task', { session_id: body.session_id }, async () => {
+      await sessionManager.handleWorking({
+        session_id: body.session_id,
+      });
+      await store.save();
+    });
+
+    return c.json({ status: 'accepted', session_id: body.session_id }, 202);
+  });
+
   // ===== POST /hook/mock-reply (PoC 테스트용) =====
   app.post('/hook/mock-reply', async (c) => {
     const url = new URL(c.req.url);
@@ -275,6 +352,48 @@ async function main() {
     return c.json({ sessions: list });
   });
 
+  return app;
+}
+
+// ===== 메인 =====
+async function main() {
+  // 설정 로드
+  const config = loadConfig();
+
+  // PID 파일
+  const existingPid = acquirePidFile();
+  if (existingPid !== null) {
+    logger.error(`Daemon already running (PID: ${existingPid})`);
+    process.exit(1);
+  }
+
+  // 저장소 초기화
+  const store = new SessionsStore();
+  await store.load();
+  logger.info('Sessions store loaded', {
+    sessionCount: store.listActive().length,
+  });
+
+  // Reply 큐 초기화
+  const replyQueue = new ReplyQueue();
+  replyQueue.startCleanupInterval();
+  await replyQueue.processFileQueue();
+
+  // Telegram 봇 초기화
+  const tg = new TelegramBot(config, store, replyQueue);
+  await tg.init();
+
+  // 세션 매니저 초기화
+  const sessionManager = new SessionManagerImpl(store, replyQueue, tg, config);
+  const lateReplyResumer = new LateReplyResumer(store, tg, {
+    groupId: config.groupId,
+  });
+  tg.setLateReplyHandler((sessionId, replyText) => (
+    lateReplyResumer.handle(sessionId, replyText)
+  ));
+
+  const app = createDaemonApp({ store, replyQueue, sessionManager });
+
   // HTTP 서버 시작
   const server = serve(
     {
@@ -301,8 +420,14 @@ async function main() {
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
-main().catch((err) => {
-  logger.error('Daemon failed to start', { error: err.message });
-  releasePidFile();
-  process.exit(1);
-});
+const isDirectExecution =
+  process.argv[1] != null &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+  main().catch((err) => {
+    logger.error('Daemon failed to start', { error: err.message });
+    releasePidFile();
+    process.exit(1);
+  });
+}

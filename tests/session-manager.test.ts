@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SessionManagerImpl } from '../src/session-manager.js';
 import { SessionsStore } from '../src/store.js';
 import { ReplyQueue } from '../src/reply-queue.js';
@@ -64,6 +64,9 @@ function makeTelegramBot() {
     sendReconnectMessage: vi.fn().mockResolvedValue(undefined),
     sendStopMessage: vi.fn().mockResolvedValue(200),
     sendCompleteMessage: vi.fn().mockResolvedValue(undefined),
+    sendResumeAckMessage: vi.fn().mockResolvedValue(undefined),
+    sendWorkingMessage: vi.fn().mockResolvedValue(undefined),
+    sendHeartbeatMessage: vi.fn().mockResolvedValue(undefined),
     sendErrorMessage: vi.fn().mockResolvedValue(undefined),
     addReaction: vi.fn().mockResolvedValue(undefined),
     getSessionByTopic: vi.fn(),
@@ -99,6 +102,13 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     total_turns: 0,
     last_user_message: '',
     last_turn_output: '',
+    last_progress_at: null,
+    last_heartbeat_at: null,
+    last_resume_ack_at: null,
+    late_reply_text: null,
+    late_reply_received_at: null,
+    late_reply_resume_started_at: null,
+    late_reply_resume_error: null,
     ...overrides,
   };
 }
@@ -119,6 +129,10 @@ describe('SessionManagerImpl', () => {
       tg as any,
       defaultConfig
     );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('handleSessionStart', () => {
@@ -215,6 +229,25 @@ describe('SessionManagerImpl', () => {
         total_turns: 1,
       })).rejects.toThrow(TlError);
     });
+
+    it('restores active state if stop message delivery fails', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+      });
+      tg.sendStopMessage.mockRejectedValueOnce(new Error('network down'));
+
+      await expect(manager.handleStopAndWait({
+        session_id: 's1',
+        turn_id: 't1',
+        last_message: 'x',
+        total_turns: 1,
+      })).rejects.toThrow('network down');
+
+      expect(store._sessions['s1'].status).toBe('active');
+      expect(store._sessions['s1'].stop_message_id).toBeNull();
+      expect(replyQueue.waitFor).not.toHaveBeenCalled();
+    });
   });
 
   describe('handleComplete', () => {
@@ -251,6 +284,59 @@ describe('SessionManagerImpl', () => {
         total_turns: 0,
         duration: '0m',
       })).rejects.toThrow(TlError);
+    });
+  });
+
+  describe('handleResumeAcknowledged', () => {
+    it('sends resume ACK only when explicitly acknowledged after stop reply delivery', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+      });
+
+      await manager.handleResumeAcknowledged({
+        session_id: 's1',
+      });
+
+      expect(tg.sendResumeAckMessage).toHaveBeenCalledWith(defaultConfig.groupId, 42);
+      expect(store._sessions['s1'].last_resume_ack_at).not.toBeNull();
+    });
+  });
+
+  describe('handleWorking', () => {
+    it('sends a working message on user prompt submit for an active root session', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+      });
+
+      await manager.handleWorking({
+        session_id: 's1',
+      });
+
+      expect(tg.sendWorkingMessage).toHaveBeenCalledWith(defaultConfig.groupId, 42);
+      expect(store._sessions['s1'].last_progress_at).not.toBeNull();
+    });
+
+    it('sends throttled heartbeat messages after working starts', async () => {
+      vi.useFakeTimers();
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+      });
+
+      await manager.handleWorking({
+        session_id: 's1',
+      });
+
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      expect(tg.sendHeartbeatMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+      expect(tg.sendHeartbeatMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1 * 60 * 1000);
+      expect(tg.sendHeartbeatMessage).toHaveBeenCalledTimes(2);
     });
   });
 });

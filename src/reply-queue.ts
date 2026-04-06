@@ -17,6 +17,14 @@ interface ReplyFileEntry {
   createdAt: string;
 }
 
+interface DeliverOptions {
+  queueIfMissing?: boolean;
+}
+
+interface WaitOptions {
+  signal?: AbortSignal;
+}
+
 function getDataDir(): string {
   return process.env.TL_DATA_DIR || path.join(os.homedir(), '.tl');
 }
@@ -37,24 +45,64 @@ export class ReplyQueue {
     }
   }
 
-  async waitFor(sessionId: string, timeoutSec: number): Promise<HookOutput> {
-    return new Promise<HookOutput>((resolve, reject) => {
+  async waitFor(
+    sessionId: string,
+    timeoutSec: number,
+    options: WaitOptions = {}
+  ): Promise<HookOutput> {
+    return new Promise<HookOutput>((resolve) => {
+      let settled = false;
+
+      const finish = (output: HookOutput): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+
+        const pending = this.pending.get(sessionId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pending.delete(sessionId);
+        }
+
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onAbort);
+        }
+
+        resolve(output);
+      };
+
       const timer = setTimeout(() => {
-        this.pending.delete(sessionId);
         logger.info('ReplyQueue timeout, returning continue', { sessionId });
-        resolve({ decision: 'continue' });
+        finish({ decision: 'continue' });
       }, timeoutSec * 1000);
+
+      const onAbort = () => {
+        logger.warn('ReplyQueue wait aborted, returning continue', { sessionId });
+        finish({ decision: 'continue' });
+      };
 
       this.pending.set(sessionId, {
         sessionId,
-        resolve,
+        resolve: finish,
         timer,
         createdAt: Date.now(),
       });
+
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+
+      if (options.signal) {
+        options.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      this.processFileQueueForSession(sessionId);
     });
   }
 
-  deliver(sessionId: string, replyText: string): boolean {
+  deliver(sessionId: string, replyText: string, options: DeliverOptions = {}): boolean {
     const entry = this.pending.get(sessionId);
     if (entry) {
       clearTimeout(entry.timer);
@@ -64,8 +112,14 @@ export class ReplyQueue {
       return true;
     }
 
-    // pending에 없으면 파일 큐에 저장
-    this.enqueueToFile(sessionId, replyText);
+    if (options.queueIfMissing !== false) {
+      // pending에 없으면 파일 큐에 저장
+      this.enqueueToFile(sessionId, replyText);
+    } else {
+      logger.warn('Reply ignored because no waiting consumer was present', {
+        sessionId,
+      });
+    }
     return false;
   }
 
@@ -119,6 +173,39 @@ export class ReplyQueue {
         fs.unlinkSync(filePath);
       } catch (err) {
         logger.error('Failed to process file queue entry', { file, error: (err as Error).message });
+      }
+    }
+  }
+
+  private processFileQueueForSession(sessionId: string): void {
+    if (!fs.existsSync(this.fileQueueDir)) return;
+
+    const files = fs.readdirSync(this.fileQueueDir)
+      .filter((file) => file.startsWith(`${sessionId}-`) && file.endsWith('.json'))
+      .sort();
+
+    for (const file of files) {
+      const filePath = path.join(this.fileQueueDir, file);
+
+      try {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const entry: ReplyFileEntry = JSON.parse(raw);
+        const pending = this.pending.get(sessionId);
+        if (!pending) {
+          return;
+        }
+
+        clearTimeout(pending.timer);
+        this.pending.delete(sessionId);
+        pending.resolve({ decision: 'block', reason: entry.replyText });
+        fs.unlinkSync(filePath);
+        logger.info('File queue reply delivered', { sessionId });
+        return;
+      } catch (err) {
+        logger.error('Failed to process file queue entry', {
+          file,
+          error: (err as Error).message,
+        });
       }
     }
   }

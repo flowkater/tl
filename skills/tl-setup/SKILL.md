@@ -42,7 +42,7 @@ cd ~/Projects/TL && ls package.json
 
 3. **Hook Port** (선택, 기본값: 9877) — 별도 지정 없으면 기본값 사용
 
-4. **Stop Timeout** (선택, 기본값: 3600) — Codex가 멈춘 후 사용자 답장 대기 시간(초)
+4. **Stop Timeout** (선택, 기본값: 7200) — Codex가 멈춘 후 사용자 답장 대기 시간(초)
 
 5. **Hook Base URL** (선택, 기본값: `http://localhost:{port}`) — 외부에서 접근 가능한 URL
 
@@ -61,7 +61,7 @@ export TL_BOT_TOKEN="수집한_토큰"
 export TL_GROUP_ID="수집한_그룹ID"
 # 선택사항:
 # export TL_HOOK_PORT=9877
-# export TL_STOP_TIMEOUT=3600
+# export TL_STOP_TIMEOUT=7200
 # export TL_HOOK_BASE_URL="http://localhost:9877"
 
 # 자동 설치

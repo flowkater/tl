@@ -1,15 +1,24 @@
 // telegram.ts — grammY 봇 래퍼 (토픽/메시지/답장)
+import https from 'node:https';
+import path from 'path';
 import { Bot, Context } from 'grammy';
 import { DaemonConfig, SessionRecord } from './types.js';
 import { ReplyQueue } from './reply-queue.js';
 import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
 
+type LateReplyHandler = (sessionId: string, replyText: string) => Promise<boolean>;
+
 export class TelegramBot {
+  private static readonly SEND_RETRY_COUNT = 3;
+  private static readonly SEND_RETRY_DELAY_MS = 400;
+  private static readonly STOP_MESSAGE_CHUNK_LIMIT = 3000;
+  private static readonly IPV4_AGENT = new https.Agent({ family: 4 });
   private bot: Bot | null = null;
   private config: DaemonConfig;
   private store: SessionsStore;
   private replyQueue: ReplyQueue;
+  private lateReplyHandler: LateReplyHandler | null = null;
 
   constructor(config: DaemonConfig, store: SessionsStore, replyQueue: ReplyQueue) {
     this.config = config;
@@ -17,12 +26,22 @@ export class TelegramBot {
     this.replyQueue = replyQueue;
   }
 
+  setLateReplyHandler(handler: LateReplyHandler): void {
+    this.lateReplyHandler = handler;
+  }
+
   async init(): Promise<void> {
     if (!this.config.botToken) {
       throw new Error('botToken is required');
     }
 
-    this.bot = new Bot(this.config.botToken);
+    this.bot = new Bot(this.config.botToken, {
+      client: {
+        baseFetchConfig: {
+          agent: TelegramBot.IPV4_AGENT,
+        },
+      },
+    });
 
     // 전역 에러 핸들링
     this.bot.catch((err) => {
@@ -38,9 +57,13 @@ export class TelegramBot {
     // 메시지 핸들러 — 단일 리스너, 동적 등록 금지
     this.bot.on('message', (ctx) => this.handleMessage(ctx));
 
-    // 폴링 시작
-    await this.bot.start({
+    // 폴링은 데몬 수명 동안 계속 유지되므로 여기서 await하면 HTTP 서버 초기화가 막힌다.
+    void this.bot.start({
       allowed_updates: ['message'],
+    }).catch((err) => {
+      logger.error('Telegram bot polling failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     logger.info('Telegram bot started (polling)');
@@ -91,31 +114,28 @@ export class TelegramBot {
   async sendStopMessage(
     chatId: number,
     topicId: number,
-    turnId: string,
+    _turnId: string,
     lastMessage: string,
     totalTurns: number
   ): Promise<number> {
     if (!this.bot) throw new Error('Bot not initialized');
 
-    // lastMessage 500자 제한
-    const preview = lastMessage.length > 500
-      ? lastMessage.slice(0, 500) + '...'
-      : lastMessage;
+    const bodyChunks = this.splitStopBody(
+      lastMessage,
+      TelegramBot.STOP_MESSAGE_CHUNK_LIMIT
+    );
 
-    const text = [
-      `✅ *Turn #${totalTurns} 완료*`,
-      '',
-      this.escapeMarkdownV2(preview),
-      '',
-      '다음에는 뭘 할까\\?',
-    ].join('\n');
+    let lastMessageId = 0;
+    for (const [index, chunk] of bodyChunks.entries()) {
+      const rendered = this.renderStopChunk(chunk, totalTurns, index === 0);
+      const msg = await this.sendMessageWithRetry(chatId, rendered, {
+        message_thread_id: topicId,
+        parse_mode: 'HTML',
+      });
+      lastMessageId = msg.message_id;
+    }
 
-    const msg = await this.bot.api.sendMessage(chatId, text, {
-      parse_mode: 'MarkdownV2',
-      message_thread_id: topicId,
-    });
-
-    return msg.message_id;
+    return lastMessageId;
   }
 
   async sendCompleteMessage(
@@ -149,6 +169,54 @@ export class TelegramBot {
     });
   }
 
+  async sendResumeAckMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '✅ reply delivered to Codex, resuming...',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
+  async sendWorkingMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '🛠️ resumed, working...',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
+  async sendHeartbeatMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '⏳ still working...',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
   async sendReplyFallbackMessage(
     chatId: number,
     topicId: number
@@ -158,6 +226,54 @@ export class TelegramBot {
     await this.bot.api.sendMessage(chatId, '⚠️ 작업 완료 메시지에 Reply해주세요', {
       message_thread_id: topicId,
     });
+  }
+
+  async sendNotWaitingMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<void> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    await this.bot.api.sendMessage(
+      chatId,
+      '⚠️ 지금은 reply 대기 상태가 아닙니다. 다음 작업 완료 메시지에 Reply해주세요',
+      {
+        message_thread_id: topicId,
+      }
+    );
+  }
+
+  async sendLateReplyResumeStartedMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '✅ late reply received, launching Codex resume...',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
+  async sendLateReplyResumeFailedMessage(
+    chatId: number,
+    topicId: number,
+    error: string
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      `⚠️ late reply resume failed: ${error}`,
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
   }
 
   async addReaction(
@@ -187,47 +303,53 @@ export class TelegramBot {
     const message = ctx.message;
     if (!message) return;
 
-    // 1. forum 토픽이 아니면 무시 (General 토픽 등)
-    if (!message.message_thread_id) return;
-
-    // 2. reply인지 확인
-    const replyTo = message.reply_to_message;
-    if (replyTo) {
-      // stop_message_id와 매칭
-      const matched = this.matchReplyToSession(message.message_thread_id, replyTo.message_id);
-      if (matched) {
-        const replyText = message.text ?? message.caption ?? '';
-        if (replyText.trim()) {
-          this.replyQueue.deliver(matched, replyText.trim());
-          // 👍 반응
-          await this.addReaction(
-            this.config.groupId,
-            message.message_id,
-            this.config.emojiReaction
-          );
-        }
-        return;
-      }
-
-      // 매칭 실패 → fallback
-      await this.sendReplyFallbackMessage(
-        this.config.groupId,
-        message.message_thread_id
-      );
+    const replyText = message.text ?? message.caption ?? '';
+    if (!replyText.trim()) {
       return;
     }
 
-    // 3. 일반 메시지 — active/waiting 세션이 있는 토픽인지 확인
-    const session = this.getSessionByTopic(message.message_thread_id);
-    if (session && session.record.status === 'waiting') {
-      // waiting 상태면 일반 메시지도 답장으로 처리
-      const replyText = message.text ?? message.caption ?? '';
-      if (replyText.trim()) {
-        this.replyQueue.deliver(session.id, replyText.trim());
-        await this.addReaction(
-          this.config.groupId,
+    // 1. reply가 있으면 먼저 stop_message_id로 전역 매칭한다.
+    const replyTo = message.reply_to_message;
+    if (replyTo) {
+      const matched = this.matchReplyToSession(replyTo.message_id);
+      if (matched) {
+        await this.routeMatchedMessage(
+          matched,
+          replyText.trim(),
           message.message_id,
-          this.config.emojiReaction
+          true,
+          message.message_thread_id
+        );
+        return;
+      }
+    }
+
+    // 2. thread_id가 있으면 해당 topic의 최신 세션으로 라우팅한다.
+    if (message.message_thread_id) {
+      const session = this.getLatestSessionByTopic(message.message_thread_id);
+      if (session) {
+        await this.routeMatchedMessage(
+          session,
+          replyText.trim(),
+          message.message_id,
+          false,
+          message.message_thread_id
+        );
+        return;
+      }
+    }
+
+    // 3. reply는 있었지만 어떤 세션에도 매칭되지 않았다.
+    if (replyTo) {
+      if (message.message_thread_id) {
+        await this.sendReplyFallbackMessage(
+          this.config.groupId,
+          message.message_thread_id
+        );
+      } else {
+        await this.sendChatLevelMessage(
+          this.config.groupId,
+          '⚠️ 작업 완료 메시지에 Reply해주세요'
         );
       }
       return;
@@ -236,32 +358,116 @@ export class TelegramBot {
     // 그 외에는 무시
   }
 
+  private async routeMatchedMessage(
+    matched: { id: string; record: SessionRecord },
+    replyText: string,
+    messageId: number,
+    allowLateReplyFromActive: boolean,
+    sourceThreadId?: number
+  ): Promise<void> {
+    if (matched.record.status === 'waiting') {
+      const delivered = this.replyQueue.deliver(
+        matched.id,
+        replyText
+      );
+      if (delivered) {
+        await this.addReaction(
+          this.config.groupId,
+          messageId,
+          this.config.emojiReaction
+        );
+      } else {
+        await this.sendNotWaitingMessage(
+          this.config.groupId,
+          sourceThreadId ?? matched.record.topic_id
+        );
+      }
+      return;
+    }
+
+    const shouldUseLateReplyHandler = matched.record.status === 'completed'
+      || allowLateReplyFromActive;
+
+    if (shouldUseLateReplyHandler && this.lateReplyHandler) {
+      try {
+        const handled = await this.lateReplyHandler(matched.id, replyText);
+        if (handled) {
+          await this.addReaction(
+            this.config.groupId,
+            messageId,
+            this.config.emojiReaction
+          );
+          return;
+        }
+      } catch (err) {
+        logger.warn('Late reply handler failed', {
+          sessionId: matched.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    await this.sendNotWaitingMessage(
+      this.config.groupId,
+      sourceThreadId ?? matched.record.topic_id
+    );
+  }
+
   private matchReplyToSession(
-    threadId: number,
     repliedToMessageId: number
-  ): string | null {
-    const sessions = this.store.listActive();
+  ): { id: string; record: SessionRecord } | null {
+    const sessions = this.listReplyTargetSessions();
     for (const { id, record } of sessions) {
-      if (
-        record.topic_id === threadId &&
-        record.stop_message_id === repliedToMessageId
-      ) {
-        return id;
+      if (record.stop_message_id === repliedToMessageId) {
+        return { id, record };
       }
     }
     return null;
   }
 
-  private getSessionByTopic(
+  private getLatestSessionByTopic(
     threadId: number
   ): { id: string; record: SessionRecord } | null {
-    const sessions = this.store.listActive();
-    for (const { id, record } of sessions) {
-      if (record.topic_id === threadId) {
-        return { id, record };
-      }
+    const sessions = this.listReplyTargetSessions()
+      .filter(({ record }) => record.topic_id === threadId)
+      .sort((a, b) => this.getSessionRecencyMs(b.record) - this.getSessionRecencyMs(a.record));
+
+    return sessions[0] ?? null;
+  }
+
+  private listReplyTargetSessions(): Array<{ id: string; record: SessionRecord }> {
+    const activeSessions = this.store.listActive();
+    const completedSessions = typeof (this.store as any).listByStatus === 'function'
+      ? this.store.listByStatus('completed')
+      : [];
+    const merged = new Map<string, SessionRecord>();
+
+    for (const { id, record } of [...activeSessions, ...completedSessions]) {
+      merged.set(id, record);
     }
-    return null;
+
+    return Array.from(merged.entries()).map(([id, record]) => ({ id, record }));
+  }
+
+  private getSessionRecencyMs(record: SessionRecord): number {
+    const statusRank = record.status === 'waiting'
+      ? 3
+      : record.status === 'active'
+        ? 2
+        : record.status === 'completed'
+          ? 1
+          : 0;
+    const effectiveAt = record.status === 'completed'
+      ? record.completed_at ?? record.started_at
+      : record.started_at;
+    const parsed = Date.parse(effectiveAt);
+    const timestamp = Number.isNaN(parsed) ? 0 : parsed;
+    return (timestamp * 10) + statusRank;
+  }
+
+  private async sendChatLevelMessage(chatId: number, text: string): Promise<void> {
+    if (!this.bot) throw new Error('Bot not initialized');
+    await this.bot.api.sendMessage(chatId, text);
   }
 
   // ===== MarkdownV2 이스케이프 =====
@@ -273,6 +479,121 @@ export class TelegramBot {
       result = result.replaceAll(char, `\\${char}`);
     }
     return result;
+  }
+
+  private splitStopBody(text: string, limit: number): string[] {
+    if (!text) {
+      return [''];
+    }
+    if (text.length <= limit) {
+      return [text];
+    }
+
+    const chunks: string[] = [];
+    let remaining = text;
+
+    while (remaining.length > limit) {
+      let splitAt = remaining.lastIndexOf('\n', limit);
+      if (splitAt <= 0) {
+        splitAt = limit;
+        chunks.push(remaining.slice(0, splitAt));
+        remaining = remaining.slice(splitAt);
+        continue;
+      }
+
+      chunks.push(remaining.slice(0, splitAt + 1));
+      remaining = remaining.slice(splitAt + 1);
+    }
+
+    if (remaining) {
+      chunks.push(remaining);
+    }
+
+    return chunks;
+  }
+
+  private async sendMessageWithRetry(
+    chatId: number,
+    text: string,
+    options: { message_thread_id: number; parse_mode?: 'HTML' | 'MarkdownV2' }
+  ): Promise<{ message_id: number }> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= TelegramBot.SEND_RETRY_COUNT; attempt++) {
+      try {
+        return await this.bot!.api.sendMessage(chatId, text, options);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt === TelegramBot.SEND_RETRY_COUNT) {
+          break;
+        }
+
+        logger.warn('Telegram sendMessage failed, retrying', {
+          chatId,
+          topicId: options.message_thread_id,
+          attempt,
+          error: lastError.message,
+        });
+        await this.delay(TelegramBot.SEND_RETRY_DELAY_MS);
+      }
+    }
+
+    throw lastError ?? new Error('sendMessage failed');
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private renderStopChunk(
+    body: string,
+    totalTurns: number,
+    includeHeader: boolean
+  ): string {
+    const parts: string[] = [];
+
+    if (includeHeader) {
+      parts.push(this.escapeHtml(`✅ Turn ${totalTurns} 완료`));
+    }
+    if (body) {
+      parts.push(this.renderTelegramStopBody(body));
+    }
+
+    return parts.join('\n\n');
+  }
+
+  private renderTelegramStopBody(text: string): string {
+    const fileRefPattern = /\[[^\]]+\]\((\/[^)]+)\)/g;
+    let result = '';
+    let lastIndex = 0;
+
+    for (const match of text.matchAll(fileRefPattern)) {
+      const index = match.index ?? 0;
+      const target = match[1];
+
+      result += this.escapeHtml(text.slice(lastIndex, index));
+      result += `<b>${this.escapeHtml(this.extractFilenameFromTarget(target))}</b>`;
+      lastIndex = index + match[0].length;
+    }
+
+    result += this.escapeHtml(text.slice(lastIndex));
+    return result;
+  }
+
+  private extractFilenameFromTarget(target: string): string {
+    const withoutAnchor = target.split('#')[0];
+    const lineIndex = withoutAnchor.indexOf(':');
+    const filePath = lineIndex >= 0
+      ? withoutAnchor.slice(0, lineIndex)
+      : withoutAnchor;
+    return path.posix.basename(filePath);
+  }
+
+  private escapeHtml(text: string): string {
+    return text
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
   }
 
   async stop(): Promise<void> {

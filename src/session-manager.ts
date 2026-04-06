@@ -7,10 +7,16 @@ import { TlError } from './errors.js';
 import { logger } from './logger.js';
 
 export class SessionManagerImpl implements SessionManager {
+  private static readonly FIRST_HEARTBEAT_DELAY_MS = 2 * 60 * 1000;
+  private static readonly HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
   private store: SessionsStore;
   private replyQueue: ReplyQueue;
   private tg: TelegramBot;
   private config: DaemonConfig;
+  private heartbeatTimers = new Map<
+    string,
+    { initial?: NodeJS.Timeout; repeat?: NodeJS.Timeout }
+  >();
 
   constructor(
     store: SessionsStore,
@@ -48,6 +54,7 @@ export class SessionManagerImpl implements SessionManager {
     if (is_reconnect && existing) {
       // 재연결: 기존 topic_id 재사용
       topic_id = existing.record.topic_id;
+      this.clearHeartbeat(session_id);
 
       this.store.update(session_id, (record) => {
         record.status = 'active';
@@ -58,6 +65,13 @@ export class SessionManagerImpl implements SessionManager {
         record.stop_message_id = null;
         record.last_user_message = args.last_user_message;
         record.last_turn_output = '';
+        record.last_progress_at = null;
+        record.last_heartbeat_at = null;
+        record.last_resume_ack_at = null;
+        record.late_reply_text = null;
+        record.late_reply_received_at = null;
+        record.late_reply_resume_started_at = null;
+        record.late_reply_resume_error = null;
       });
 
       await this.tg.sendReconnectMessage(
@@ -83,6 +97,13 @@ export class SessionManagerImpl implements SessionManager {
         total_turns: 0,
         last_user_message: args.last_user_message,
         last_turn_output: '',
+        last_progress_at: null,
+        last_heartbeat_at: null,
+        last_resume_ack_at: null,
+        late_reply_text: null,
+        late_reply_received_at: null,
+        late_reply_resume_started_at: null,
+        late_reply_resume_error: null,
       });
 
       await this.tg.sendStartMessage(
@@ -107,6 +128,7 @@ export class SessionManagerImpl implements SessionManager {
     turn_id: string;
     last_message: string;
     total_turns: number;
+    abort_signal?: AbortSignal;
   }): Promise<HookOutput> {
     const { session_id, last_message, total_turns } = args;
 
@@ -126,23 +148,37 @@ export class SessionManagerImpl implements SessionManager {
       record.status = 'waiting';
       record.total_turns = total_turns;
       record.last_turn_output = last_message;
+      record.stop_message_id = null;
+      record.last_progress_at = null;
+      record.last_heartbeat_at = null;
     });
+    this.clearHeartbeat(session_id);
 
-    // 2. Telegram에 stop 메시지 전송 (답장 대기용)
-    const stopMessageId = await this.tg.sendStopMessage(
-      this.config.groupId,
-      existing.record.topic_id,
-      args.turn_id,
-      last_message,
-      total_turns
-    );
+    let stopMessageId: number;
+    try {
+      // 2. Telegram에 stop 메시지 전송 (답장 대기용)
+      stopMessageId = await this.tg.sendStopMessage(
+        this.config.groupId,
+        existing.record.topic_id,
+        args.turn_id,
+        last_message,
+        total_turns
+      );
+    } catch (err) {
+      this.store.update(session_id, (record) => {
+        record.status = 'active';
+      });
+      throw err;
+    }
 
     this.store.update(session_id, (record) => {
       record.stop_message_id = stopMessageId;
     });
 
     // 3. Reply 대기 (long-polling)
-    const reply = await this.replyQueue.waitFor(session_id, this.config.stopTimeout);
+    const reply = await this.replyQueue.waitFor(session_id, this.config.stopTimeout, {
+      signal: args.abort_signal,
+    });
 
     if (reply.decision === 'continue') {
       // 타임아웃 → active 복귀 (에이전트 계속 진행)
@@ -154,12 +190,63 @@ export class SessionManagerImpl implements SessionManager {
 
     // 4. 사용자 답장 받음 → active 복귀
     const replyText = reply.decision === 'block' ? reply.reason : 'reply';
-    this.store.update(session_id, (record) => {
-      record.status = 'active';
-      record.last_user_message = replyText;
-    });
+      this.store.update(session_id, (record) => {
+        record.status = 'active';
+        record.last_user_message = replyText;
+      });
 
     return reply;
+  }
+
+  async handleResumeAcknowledged(args: {
+    session_id: string;
+  }): Promise<void> {
+    const existing = this.store.get(args.session_id);
+    if (!existing) {
+      throw new TlError('Session not found', 'SESSION_NOT_FOUND');
+    }
+    if (existing.record.status !== 'active') {
+      throw new TlError(
+        `Expected active but was ${existing.record.status}`,
+        'TRANSITION_INVALID'
+      );
+    }
+
+    await this.tg.sendResumeAckMessage(
+      this.config.groupId,
+      existing.record.topic_id
+    );
+
+    this.store.update(args.session_id, (record) => {
+      record.last_resume_ack_at = new Date().toISOString();
+    });
+  }
+
+  async handleWorking(args: {
+    session_id: string;
+  }): Promise<void> {
+    const existing = this.store.get(args.session_id);
+    if (!existing) {
+      throw new TlError('Session not found', 'SESSION_NOT_FOUND');
+    }
+    if (existing.record.status !== 'active') {
+      throw new TlError(
+        `Expected active but was ${existing.record.status}`,
+        'TRANSITION_INVALID'
+      );
+    }
+
+    await this.tg.sendWorkingMessage(
+      this.config.groupId,
+      existing.record.topic_id
+    );
+
+    this.store.update(args.session_id, (record) => {
+      record.last_progress_at = new Date().toISOString();
+      record.last_heartbeat_at = null;
+    });
+
+    this.scheduleHeartbeat(args.session_id);
   }
 
   // ===== complete =====
@@ -170,6 +257,7 @@ export class SessionManagerImpl implements SessionManager {
     duration: string;
   }): Promise<void> {
     const { session_id, total_turns, duration } = args;
+    this.clearHeartbeat(session_id);
 
     const existing = this.store.get(session_id);
     if (!existing) {
@@ -195,5 +283,79 @@ export class SessionManagerImpl implements SessionManager {
     );
 
     logger.info('Session completed', { session_id, total_turns, duration });
+  }
+
+  private scheduleHeartbeat(sessionId: string): void {
+    this.clearHeartbeat(sessionId);
+
+    const initial = setTimeout(() => {
+      void this.sendHeartbeat(sessionId);
+
+      const repeat = setInterval(() => {
+        void this.sendHeartbeat(sessionId);
+      }, SessionManagerImpl.HEARTBEAT_INTERVAL_MS);
+
+      const entry = this.heartbeatTimers.get(sessionId) ?? {};
+      entry.repeat = repeat;
+      this.heartbeatTimers.set(sessionId, entry);
+    }, SessionManagerImpl.FIRST_HEARTBEAT_DELAY_MS);
+
+    this.heartbeatTimers.set(sessionId, { initial });
+  }
+
+  private clearHeartbeat(sessionId: string): void {
+    const timers = this.heartbeatTimers.get(sessionId);
+    if (!timers) {
+      return;
+    }
+    if (timers.initial) {
+      clearTimeout(timers.initial);
+    }
+    if (timers.repeat) {
+      clearInterval(timers.repeat);
+    }
+    this.heartbeatTimers.delete(sessionId);
+  }
+
+  private async sendHeartbeat(sessionId: string): Promise<void> {
+    const existing = this.store.get(sessionId);
+    if (!existing || existing.record.status !== 'active') {
+      this.clearHeartbeat(sessionId);
+      return;
+    }
+
+    const now = Date.now();
+    const lastProgressAt = existing.record.last_progress_at
+      ? Date.parse(existing.record.last_progress_at)
+      : NaN;
+    const lastHeartbeatAt = existing.record.last_heartbeat_at
+      ? Date.parse(existing.record.last_heartbeat_at)
+      : NaN;
+
+    const hasHeartbeat = !Number.isNaN(lastHeartbeatAt);
+    const requiredGap = hasHeartbeat
+      ? SessionManagerImpl.HEARTBEAT_INTERVAL_MS
+      : SessionManagerImpl.FIRST_HEARTBEAT_DELAY_MS;
+    const baseline = hasHeartbeat ? lastHeartbeatAt : lastProgressAt;
+
+    if (Number.isNaN(baseline) || now - baseline < requiredGap) {
+      return;
+    }
+
+    try {
+      await this.tg.sendHeartbeatMessage(
+        this.config.groupId,
+        existing.record.topic_id
+      );
+      this.store.update(sessionId, (record) => {
+        record.last_heartbeat_at = new Date().toISOString();
+      });
+      await this.store.save();
+    } catch (err) {
+      logger.warn('Failed to send heartbeat message', {
+        session_id: sessionId,
+        error: (err as Error).message,
+      });
+    }
   }
 }

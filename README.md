@@ -1,207 +1,308 @@
 # TL — Codex ↔ Telegram Bridge
 
-> Codex 세션을 Telegram 토픽에 연결하여, 터미널 밖에서도 개발을 계속할 수 있게 하는 로컬 브릿지.
+Codex 세션을 Telegram forum topic에 연결하는 로컬 bridge다.
+작업 완료 메시지를 Telegram으로 받고, reply만으로 다음 턴을 이어갈 수 있다.
 
-**목표**: 터미널 안 봐도 됨. Codex가 작업하는 동안 텔레그램으로 확인하고, 답장만으로 개발 계속.
+## 동작 개요
 
----
-
-## 🏗️ 아키텍처
-
-```
-┌──────────────────┐         ┌───────────────────────┐         ┌──────────────┐
-│  Codex CLI       │         │  tl daemon            │         │  Telegram    │
-│  (PTY TUI)       │ ─hook→  │  (Hono HTTP :9877)    │ ─bot→   │  Group Topic │
-│                  │ ←wait── │  + grammy Bot          │ ←reply─ │              │
-└──────────────────┘         └───────────────────────┘         └──────────────┘
+```text
+Codex hook
+  -> tl daemon (HTTP + Telegram bot)
+  -> Telegram topic
+  -> user reply
+  -> tl daemon
+  -> Codex Stop hook result
 ```
 
-1. **SessionStart 훅** → tl 데몬이 Telegram에 새 토픽 생성
-2. **Stop 훅** → 작업 완료 메시지 TG 토픽으로 전송 → 답장 대기
-3. **유저 답장** → tl 데몬이 훅 프로세스에 전달 → Codex가 새 프롬프트로 계속
+기본 흐름:
 
----
+1. root `SessionStart`에서 topic 생성 또는 재연결
+2. `Stop`에서 마지막 메시지를 Telegram으로 전송
+3. Telegram reply를 받으면 Stop hook 결과를 Codex에 반환
 
-## 📦 설치
+현재 구현 기준 추가 동작:
 
-### 필수 요구사항
+- subagent `SessionStart`는 무시된다.
+- `resume`으로 다시 열린 세션은 기존 topic에 재연결된다.
+- Stop 메시지 본문은 현재 turn의 assistant `commentary + final`을 transcript에서 합쳐서 만든다.
+- 긴 Stop 메시지는 잘리지 않도록 여러 조각으로 나뉘어 전송된다.
+- `waiting` 중 reply가 consumer보다 먼저 도착해도 queue에 저장됐다가 같은 wait에서 소비된다.
+- Stop 메시지 전송이 최종 실패하면 세션을 `waiting`에 방치하지 않고 다시 `active`로 복구한다.
+- reply reaction은 TL이 reply를 수신했다는 뜻이고, 별도의 `✅ reply delivered to Codex, resuming...` 메시지는 Stop hook 성공 경로에서만 전송된다.
+- 재개 후 root 세션에는 `🛠️ resumed, working...` 메시지가 추가되고, 장시간 작업일 때만 `⏳ still working...` heartbeat가 드물게 append된다.
+- 같은 topic 안에서는 일반 메시지도 `thread_id` 기준으로 해당 topic의 최신 세션으로 라우팅된다. `All` 뷰처럼 `thread_id`가 없을 때만 `Reply`가 필요하다.
+- `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 TL은 `completed` 세션까지 `stop_message_id`로 매칭하고, late reply를 기록한 뒤 `codex exec resume --dangerously-bypass-approvals-and-sandbox <session_id> <reply>` fallback을 시도한다.
 
-- **Node.js** 20+
-- **npm** 9+
-- **OpenAI Codex CLI** 설치됨 (`npm install -g @openai/codex`)
-- **Telegram Bot Token** (@BotFather에서 `/newbot`)
-- **Telegram Group (Topics ON)** — 1:1 채팅 불가, 그룹 필수
+## 요구사항
 
-### 빠른 시작
+- Node.js 20+
+- npm 9+
+- OpenAI Codex CLI
+- Telegram Bot Token
+- Topics가 켜진 Telegram 그룹
+- 봇이 해당 그룹에 추가되어 있고, 가능하면 admin 권한이 있는 상태
+
+## 빠른 시작
 
 ```bash
 git clone https://github.com/tonyclaw/tl.git
 cd tl
 npm install
 npm run build
+npm run test
+npm install -g .
 ```
 
-### 설정
+## Codex hooks 설치
+
+TL 템플릿은 `templates/hooks.json`에 들어 있다.
+이 템플릿은 intentionally minimal TL-only 구성이며, 아래 두 command만 포함한다.
+
+```json
+{
+  "type": "command",
+  "command": "tl hook-session-start",
+  "statusMessage": "Connecting to Telegram..."
+}
+```
+
+```json
+{
+  "type": "command",
+  "command": "tl hook-stop-and-wait",
+  "timeout": 7200
+}
+```
+
+중요:
+
+- `tl setup`은 현재 `~/.codex/hooks.json`을 TL 템플릿으로 복사한다.
+- `tl init --force`도 overwrite다.
+- 기존 `hooks.json`에 다른 hook가 있다면, overwrite 대신 backup 후 병합해야 한다.
+- 최종 hook graph에서 TL hook는 이벤트당 정확히 한 번만 존재해야 한다.
+  - `SessionStart`의 `tl hook-session-start` 한 번
+  - `Stop`의 `tl hook-stop-and-wait` 한 번
+- wrapper/router가 이미 TL을 호출한다면 raw TL hook를 또 추가하면 안 된다.
+
+### Clean 환경
+
+`~/.codex/hooks.json`이 아직 없다면 아래 중 하나를 써도 된다.
 
 ```bash
-# 대화형 설정
-npx tsx bin/tl setup
+tl init
+```
 
-# 또는 환경변수로 (스크립트/자동화용)
+또는
+
+```bash
+cp templates/hooks.json ~/.codex/hooks.json
+```
+
+### 기존 hooks.json이 이미 있는 환경
+
+권장 절차:
+
+1. 기존 파일 백업
+2. 기존 `SessionStart`와 `Stop` 구조 유지
+3. TL hook command만 중복 없이 병합
+4. JSON 파싱 확인
+
+`tl setup`이나 `tl init --force`를 그대로 쓰지 않는 편이 안전하다.
+
+## 설정
+
+### 1. Codex hook 기능 활성화
+
+`~/.codex/config.toml`에 아래가 필요하다.
+
+```toml
+[features]
+codex_hooks = true
+```
+
+기존 파일이 있다면 다른 설정은 유지하고 `codex_hooks = true`만 추가한다.
+
+### 2. TL 설정값 저장
+
+설정 파일 위치:
+
+- `~/.tl/config.json`
+
+필수 값:
+
+- `botToken`
+- `groupId`
+
+선택 값:
+
+- `hookPort` 기본값 `9877`
+- `hookBaseUrl` 기본값 `http://localhost:9877`
+- `stopTimeout` 기본값 `7200`
+- `emojiReaction` 기본값 `👍`
+- `liveStream` 기본값 `false`
+
+### Clean 환경에서 빠르게 설정
+
+```bash
 export TL_BOT_TOKEN="123456:ABCdef..."
 export TL_GROUP_ID="-1001234567890"
-npx tsx bin/tl setup --non-interactive
+tl setup --non-interactive
 ```
 
-### 데몬 시작
+단, 이 경로는 `~/.codex/hooks.json` overwrite를 수반할 수 있으므로 clean 환경에서만 권장한다.
+
+### 기존 custom hook가 있는 환경에서 안전하게 설정
 
 ```bash
-npx tsx bin/tl start
+tl config set \
+  botToken="123456:ABCdef..." \
+  groupId=-1001234567890 \
+  hookPort=9877 \
+  hookBaseUrl="http://localhost:9877" \
+  stopTimeout=7200 \
+  emojiReaction="👍" \
+  liveStream=false
 ```
 
-### 검증
+그 다음 daemon을 재시작한다.
 
 ```bash
-npx tsx bin/tl status
-# Telegram 그룹에서 /tl-status 전송 → 봇 응답 확인
+tl stop
+tl start
 ```
 
----
+## 검증
 
-## 🎯 사용법
+```bash
+tl help
+tl status
+cat ~/.codex/config.toml
+cat ~/.codex/hooks.json
+cat ~/.tl/config.json
+```
+
+Telegram 쪽 검증:
+
+1. 대상 그룹에 봇 추가
+2. 그룹에서 `/tl-status@<bot_username>` 전송
+3. 새 root Codex 세션 시작
+4. topic 생성 여부 확인
+
+## Codex에게 설치 맡기기
+
+`PROMPTS.md`는 아래 문제를 피하도록 업데이트되어 있다.
+
+- 기존 `hooks.json` overwrite
+- TL hook 중복 등록
+- wrapper/router와 TL direct hook의 이중 호출
+- 자격증명 없는 상태에서 interactive setup 강행
+
+권장 실행:
+
+```bash
+cd tl
+codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL safely"
+```
+
+또는 자격증명을 같이 넘길 수 있다.
+
+```bash
+cd tl
+TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
+  codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL safely"
+```
+
+## 세션/운영 메모
 
 ### 새 세션 시작
 
 ```bash
 cd my-project
 codex
-# SessionStart 훅이 자동으로 TG 토픽 생성
 ```
 
-### 세션 관리
+주의:
+
+- TL 훅 설치 전에 이미 열려 있던 Codex 세션에는 `SessionStart`가 소급 적용되지 않는다.
+- 설치 후 topic 생성은 새 root 세션부터 적용된다.
+
+### 세션 상태 확인
 
 ```bash
-npx tsx bin/tl sessions          # 모든 세션
-npx tsx bin/tl sessions active   # 활성 세션만
-npx tsx bin/tl status            # 데몬 상태
+tl sessions
+tl sessions active
+tl sessions waiting
+tl status
 ```
 
-### 설정 변경
+### TL 대기 상태만 복구
 
 ```bash
-npx tsx bin/tl config get              # 전체 설정
-npx tsx bin/tl config get botToken     # 특정 값
-npx tsx bin/tl config set hookPort=9999  # 설정 변경
+tl resume <session_id>
 ```
 
-### 데몬 관리
+이 명령은 Codex 세션 자체를 다시 여는 명령이 아니다.
+열려 있는 Codex 세션은 유지한 채 TL waiting 상태만 풀어준다.
 
-```bash
-npx tsx bin/tl start    # 시작
-npx tsx bin/tl stop     # 정지
-npx tsx bin/tl status   # 상태 확인
-```
+## 문제 해결
 
-## 🤖 Codex에게 설치 맡기기 (권장)
+### Telegram 메시지가 안 옴
 
-레포에 `PROMPTS.md`를 동봉해두면 Codex가 알아서 설치합니다:
+확인 순서:
 
-**방법 1: PROMPTS.md 사용 (권장)**
-```bash
-cd tl
-codex exec --full-auto "Follow the instructions in PROMPTS.md to install and configure TL"
-```
+1. `tl status`
+2. `~/.tl/config.json`의 `botToken`, `groupId`
+3. 봇이 그룹에 있는지
+4. Topics가 켜져 있는지
+5. `/tl-status@<bot_username>` 응답 여부
 
-**방법 2: 한 줄 명령어**
-```bash
-codex exec --full-auto "npm install && npm run build && mkdir -p ~/.codex && echo -e '[features]\ncodex_hooks = true' >> ~/.codex/config.toml && cp templates/hooks.json ~/.codex/hooks.json && npm install -g ."
-```
+참고:
 
-PROMPTS.md가 하는 일:
-1. `npm install` + `npm run build` — 의존성 설치 및 빌드
-2. `~/.codex/config.toml`에 `codex_hooks = true` 설정
-3. `templates/hooks.json` → `~/.codex/hooks.json` 복사
-4. `npm install -g .` — `tl` 명령어 전역 설치
-5. `npm run test` — 테스트 검증
-6. 봇 토큰/그룹 ID는 건드리지 않음 (사용자 설정 영역)
+- TL은 일부 macOS/Node 환경에서 Telegram HTTPS 타임아웃을 피하기 위해 IPv4 agent를 사용한다.
+- reply reaction만 찍히고 resume ACK가 안 오면, TL 수신은 됐지만 `hook-stop-and-wait` 성공 경계까지는 가지 못한 상황으로 봐야 한다.
 
----
+### 훅이 두 번 실행됨
 
-## 📋 CLI 명령어
+원인:
+
+- TL hook를 direct로 넣고
+- wrapper/router 안에서도 TL을 또 호출한 경우
+
+해결:
+
+- TL hook path는 최종적으로 이벤트당 한 번만 남긴다.
+
+### Stop hook이 오래 기다림
+
+가능한 원인:
+
+- 실제로 Telegram reply를 기다리는 정상 대기
+- 전송 실패 재시도
+- session mapping이 없는 Stop
+
+현재 구현은:
+
+- early reply queue 처리
+- 전송 재시도
+- 전송 실패 시 `active` 복구
+
+를 포함한다.
+
+## 주요 명령어
 
 | 명령어 | 설명 |
 |--------|------|
-| `tl start` | 데몬 시작 (백그라운드) |
-| `tl stop` | 데몬 정지 |
-| `tl status` | 데몬 상태 + 활성 세션 |
-| `tl sessions [filter]` | 세션 목록 (active/waiting/completed) |
-| `tl resume <session_id>` | 세션 재개 |
-| `tl setup [--non-interactive]` | Telegram 연동 설정 |
-| `tl init [--force]` | Codex hooks.json 설치 |
+| `tl start` | daemon 시작 |
+| `tl stop` | daemon 정지 |
+| `tl status` | daemon 상태 |
+| `tl sessions [filter]` | 세션 목록 |
+| `tl resume <session_id>` | waiting 세션 복구 |
+| `tl setup [--non-interactive]` | 설정 저장 + hooks 설치 + daemon 재시작 |
+| `tl init [--force]` | TL hooks 템플릿 설치 |
 | `tl config get [KEY]` | 설정 조회 |
 | `tl config set KEY=VALUE` | 설정 변경 |
 
----
-
-## 🗂️ 프로젝트 구조
-
-```
-tl/
-├── src/
-│   ├── daemon.ts            # 메인 서버 (HTTP + TG 봇)
-│   ├── session-manager.ts   # 세션↔토픽 매핑 + 상태 추적
-│   ├── telegram.ts          # grammY 봇 (토픽/메시지/답장)
-│   ├── store.ts             # 파일 기반 세션 저장
-│   ├── reply-queue.ts       # 답장 FIFO 큐
-│   ├── config.ts            # 설정 관리
-│   ├── logger.ts            # 로깅
-│   ├── errors.ts            # 에러 정의
-│   ├── cli.ts               # CLI 진입점
-│   ├── types.ts             # 타입 정의
-│   └── hooks/
-│       ├── session-start.ts # SessionStart 훅 CLI
-│       └── stop-and-wait.ts # Stop 훅 CLI (블로킹 대기)
-├── bin/
-│   └── tl                   # CLI 래퍼
-├── templates/
-│   └── hooks.json           # Codex hook 템플릿
-├── skills/
-│   └── tl-setup/
-│       └── SKILL.md         # Hermes Agent 스킬
-├── tests/                   # vitest 테스트
-├── docs/                    # 설계 문서
-├── package.json
-└── tsconfig.json
-```
-
----
-
-## 🔧 기술 스택
-
-| 항목 | 선택 |
-|------|------|
-| 런타임 | Node.js 20+ / TypeScript |
-| HTTP 서버 | Hono + @hono/node-server |
-| Telegram 봇 | grammY |
-| 개발 서버 | tsx watch |
-| 테스트 | vitest |
-| 상태 저장 | JSON 파일 (`~/.tl/sessions.json`) |
-
----
-
-## 🧪 개발
-
-```bash
-npm install          # 의존성 설치
-npm run build        # TypeScript 컴파일
-npm run dev          # 개발 모드 (watch)
-npm run test         # 테스트 실행
-npm run test:watch   # 테스트 watch 모드
-```
-
----
-
-## ⚙️ 설정 파일
+## 설정 파일 예시
 
 ### `~/.tl/config.json`
 
@@ -211,47 +312,12 @@ npm run test:watch   # 테스트 watch 모드
   "groupId": -1001234567890,
   "hookPort": 9877,
   "hookBaseUrl": "http://localhost:9877",
-  "stopTimeout": 3600,
+  "stopTimeout": 7200,
   "emojiReaction": "👍",
   "liveStream": false
 }
 ```
 
-### `~/.codex/hooks.json` (자동 설치)
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "tl hook-session-start",
-            "statusMessage": "Connecting to Telegram..."
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "tl hook-stop-and-wait",
-            "timeout": 3600
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-> Codex에서 hooks를 사용하려면 `~/.codex/config.toml`에 `codex_hooks = true` 설정이 필요합니다.
-
----
-
-## 📄 LICENSE
+## LICENSE
 
 MIT

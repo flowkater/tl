@@ -53,7 +53,7 @@ describe('config', () => {
       expect(config.botToken).toBe('tok');
       expect(config.groupId).toBe(-100123);
       expect(config.hookPort).toBe(9877);
-      expect(config.stopTimeout).toBe(3600);
+      expect(config.stopTimeout).toBe(7200);
       expect(config.liveStream).toBe(false);
       expect(config.emojiReaction).toBe('👍');
       expect(config.hookBaseUrl).toBe('http://localhost:9877');

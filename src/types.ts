@@ -15,6 +15,13 @@ export interface SessionRecord {
   total_turns: number;         // 총 턴 수
   last_user_message: string;   // 마지막 사용자 메시지
   last_turn_output: string;    // 마지막 AI 출력
+  last_progress_at: string | null;    // 마지막 working 메시지 전송 시각
+  last_heartbeat_at: string | null;   // 마지막 heartbeat 전송 시각
+  last_resume_ack_at: string | null;  // 마지막 resume ACK 전송 시각
+  late_reply_text: string | null;     // waiting 이후 도착한 reply
+  late_reply_received_at: string | null;
+  late_reply_resume_started_at: string | null;
+  late_reply_resume_error: string | null;
 }
 
 export interface SessionsFile {
@@ -51,6 +58,13 @@ export interface StopPayload {
   last_assistant_message: string;
 }
 
+export interface UserPromptSubmitPayload {
+  session_id: string;
+  hook_event_name: 'UserPromptSubmit';
+  prompt?: string;
+  cwd?: string;
+}
+
 // ===== Stop 훅 출력 (discriminated union) =====
 export type HookOutput =
   | { decision: 'block'; reason: string }
@@ -74,12 +88,21 @@ export interface SessionManager {
     turn_id: string;
     last_message: string;
     total_turns: number;
+    abort_signal?: AbortSignal;
   }): Promise<HookOutput>;
 
   handleComplete(args: {
     session_id: string;
     total_turns: number;
     duration: string;
+  }): Promise<void>;
+
+  handleResumeAcknowledged(args: {
+    session_id: string;
+  }): Promise<void>;
+
+  handleWorking(args: {
+    session_id: string;
   }): Promise<void>;
 }
 
@@ -90,7 +113,7 @@ export interface DaemonConfig {
   topicPrefix: string;         // 기본: '🔧'
   hookPort: number;            // 기본: 9877
   hookBaseUrl: string;         // 기본: 'http://localhost:9877'
-  stopTimeout: number;         // 기본: 3600 (초)
+  stopTimeout: number;         // 기본: 7200 (초)
   liveStream: boolean;         // 기본: false
   emojiReaction: string;       // 기본: '👍'
 }

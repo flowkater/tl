@@ -7,6 +7,16 @@ import os from 'os';
 import { spawn } from 'child_process';
 
 import readline from 'readline';
+import { serializeStopHookOutput } from './stop-hook-output.js';
+import {
+  isReconnectSessionStart,
+  isSubagentSessionStart,
+} from './session-start-filter.js';
+import {
+  HookOutput,
+  SessionStartPayload,
+  UserPromptSubmitPayload,
+} from './types.js';
 
 function getConfigDir(): string {
   return process.env.TL_CONFIG_DIR || path.join(os.homedir(), '.tl');
@@ -47,6 +57,8 @@ async function main() {
       return cmdHookSessionStart();
     case 'hook-stop-and-wait':
       return cmdHookStopAndWait();
+    case 'hook-working':
+      return cmdHookWorking();
     case 'help':
     case undefined:
       return cmdHelp();
@@ -292,7 +304,7 @@ async function cmdSetup(args: string[]) {
     groupId = String(process.env.TL_GROUP_ID ?? existing.groupId ?? '');
     hookPort = String(process.env.TL_HOOK_PORT ?? existing.hookPort ?? 9877);
     hookBaseUrl = process.env.TL_HOOK_BASE_URL || existing.hookBaseUrl || `http://localhost:${hookPort}`;
-    stopTimeout = String(process.env.TL_STOP_TIMEOUT ?? existing.stopTimeout ?? 3600);
+    stopTimeout = String(process.env.TL_STOP_TIMEOUT ?? existing.stopTimeout ?? 7200);
     emojiReaction = process.env.TL_EMOJI_REACTION || existing.emojiReaction || '👍';
     liveStream = process.env.TL_LIVE_STREAM || String(existing.liveStream ?? false);
   } else {
@@ -316,7 +328,7 @@ async function cmdSetup(args: string[]) {
 
     hookPort = await ask(rl, 'Hook server port', String(existing.hookPort || 9877));
     hookBaseUrl = await ask(rl, 'Hook base URL (daemon이 접근할 주소)', existing.hookBaseUrl || `http://localhost:${hookPort}`);
-    stopTimeout = await ask(rl, 'Stop timeout (초, 기본 3600=1시간)', String(existing.stopTimeout || 3600));
+    stopTimeout = await ask(rl, 'Stop timeout (초, 기본 7200=2시간)', String(existing.stopTimeout || 7200));
     emojiReaction = await ask(rl, 'Reaction emoji (세션 시작 시)', existing.emojiReaction || '👍');
     liveStream = await ask(rl, 'Live streaming? (true/false)', String(existing.liveStream || false));
 
@@ -487,10 +499,18 @@ async function cmdHookSessionStart() {
   }
 
   try {
+    const payload = JSON.parse(stdin) as SessionStartPayload;
+    if (isSubagentSessionStart(payload)) {
+      process.exit(0);
+    }
+
     const res = await fetch(`http://localhost:${port}/hook/session-start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: stdin,
+      body: JSON.stringify({
+        ...payload,
+        is_reconnect: isReconnectSessionStart(payload),
+      }),
     });
 
     const data = await res.json();
@@ -511,12 +531,12 @@ async function cmdHookSessionStart() {
 async function cmdHookStopAndWait() {
   const configPath = path.join(getConfigDir(), 'config.json');
   let port = 9877;
-  let stopTimeout = 3600;
+  let stopTimeout = 7200;
   if (fs.existsSync(configPath)) {
     try {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       port = config.hookPort || 9877;
-      stopTimeout = config.stopTimeout || 3600;
+      stopTimeout = config.stopTimeout || 7200;
     } catch {
       // ignore
     }
@@ -540,17 +560,100 @@ async function cmdHookStopAndWait() {
 
     if (!res.ok) {
       process.stderr.write(`Warning: HTTP ${res.status}: ${JSON.stringify(data)}\n`);
-      process.stdout.write(JSON.stringify({ decision: 'continue' }) + '\n');
       process.exit(0);
     }
 
-    process.stdout.write(JSON.stringify(data) + '\n');
+    const serialized = serializeStopHookOutput(data);
+    if (serialized) {
+      const payload = JSON.parse(stdin) as { session_id?: string };
+      await writeStdout(serialized + '\n');
+      if (payload.session_id && !resumeAckAlreadyQueued(data)) {
+        await postResumeAck(payload.session_id, port);
+      }
+    }
     process.exit(0);
   } catch (err) {
     process.stderr.write(`Warning: Hook connection failed: ${(err as Error).message}\n`);
-    process.stdout.write(JSON.stringify({ decision: 'continue' }) + '\n');
     process.exit(0);
   }
+}
+
+async function cmdHookWorking() {
+  const configPath = path.join(getConfigDir(), 'config.json');
+  let port = 9877;
+  if (fs.existsSync(configPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      port = config.hookPort || 9877;
+    } catch {
+      // ignore
+    }
+  }
+
+  const stdin = fs.readFileSync(0, 'utf-8');
+  if (!stdin.trim()) {
+    process.stderr.write('Warning: No input on stdin\n');
+    process.exit(0);
+  }
+
+  try {
+    const payload = JSON.parse(stdin) as UserPromptSubmitPayload;
+    if (!payload.session_id) {
+      process.stderr.write('Warning: Missing session_id\n');
+      process.exit(0);
+    }
+
+    const res = await fetch(`http://localhost:${port}/hook/working`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5_000),
+    });
+
+    if (!res.ok) {
+      const data = await res.text();
+      process.stderr.write(`Warning: HTTP ${res.status}: ${data}\n`);
+    }
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`Warning: Working hook failed: ${(err as Error).message}\n`);
+    process.exit(0);
+  }
+}
+
+async function writeStdout(text: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(text, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function postResumeAck(sessionId: string, port: number): Promise<void> {
+  try {
+    await fetch(`http://localhost:${port}/hook/resume-ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (err) {
+    process.stderr.write(
+      `Warning: Resume ACK failed: ${(err as Error).message}\n`
+    );
+  }
+}
+
+type StopAndWaitResponse = HookOutput & {
+  resume_ack_queued?: boolean;
+};
+
+function resumeAckAlreadyQueued(output: StopAndWaitResponse): boolean {
+  return output.decision === 'block' && output.resume_ack_queued === true;
 }
 
 // ===== tl help =====
@@ -574,6 +677,7 @@ Usage:
 Internal (used by Codex hooks):
   tl hook-session-start        Handle SessionStart hook (stdin → HTTP POST)
   tl hook-stop-and-wait        Handle Stop hook (stdin → POST → long-poll → stdout)
+  tl hook-working              Handle UserPromptSubmit hook (stdin → HTTP POST)
 `);
 }
 
