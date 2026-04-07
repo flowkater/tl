@@ -52,22 +52,33 @@ export class SessionManagerImpl implements SessionManager {
       remote_endpoint,
       remote_thread_id,
     } = args;
+    const existingSession = this.store.get(session_id);
     const remoteEnabled = typeof remote_endpoint === 'string' && remote_endpoint.length > 0;
+    const reusedRemote = is_reconnect && existingSession
+      ? hasRemoteSessionAttachment(existingSession.record)
+      : false;
+    const effectiveRemoteEnabled = remoteEnabled || reusedRemote;
+    const effectiveRemoteEndpoint = remoteEnabled
+      ? remote_endpoint
+      : reusedRemote
+        ? existingSession?.record.remote_endpoint ?? null
+        : null;
     const resolvedRemoteThreadId = remoteEnabled
       ? (remote_thread_id && remote_thread_id.length > 0 ? remote_thread_id : session_id)
-      : null;
+      : reusedRemote
+        ? existingSession?.record.remote_thread_id ?? session_id
+        : null;
 
     // 상태 검증
-    const existing = this.store.get(session_id);
-    if (existing && !is_reconnect) {
+    if (existingSession && !is_reconnect) {
       throw new TlError('Session already exists', 'SESSION_EXISTS');
     }
 
     let topic_id: number;
 
-    if (is_reconnect && existing) {
+    if (is_reconnect && existingSession) {
       // 재연결: 기존 topic_id 재사용
-      topic_id = existing.record.topic_id;
+      topic_id = existingSession.record.topic_id;
       this.clearHeartbeat(session_id);
 
       await this.tg.sendReconnectMessage(
@@ -78,10 +89,11 @@ export class SessionManagerImpl implements SessionManager {
 
       this.store.update(session_id, (record) => {
         record.status = 'active';
+        record.mode = effectiveRemoteEnabled ? 'remote-managed' : 'local';
         record.chat_id = this.config.groupId;
         record.started_at = new Date().toISOString();
         record.model = model;
-        record.total_turns = existing.record.total_turns;
+        record.total_turns = existingSession.record.total_turns;
         record.reply_message_id = null;
         record.stop_message_id = null;
         record.last_user_message = args.last_user_message;
@@ -93,14 +105,24 @@ export class SessionManagerImpl implements SessionManager {
         record.late_reply_received_at = null;
         record.late_reply_resume_started_at = null;
         record.late_reply_resume_error = null;
-        record.remote_mode_enabled = remoteEnabled || record.remote_mode_enabled;
-        record.remote_endpoint = remoteEnabled ? remote_endpoint : record.remote_endpoint;
-        record.remote_thread_id = remoteEnabled
+        record.remote_mode_enabled = effectiveRemoteEnabled;
+        record.remote_input_owner = effectiveRemoteEnabled ? 'telegram' : null;
+        record.remote_status = effectiveRemoteEnabled ? 'attached' : null;
+        record.remote_endpoint = effectiveRemoteEnabled
+          ? effectiveRemoteEndpoint
+          : null;
+        record.remote_thread_id = effectiveRemoteEnabled
           ? resolvedRemoteThreadId
-          : record.remote_thread_id;
+          : null;
+        record.remote_last_error = null;
+        record.remote_last_recovery_at = null;
         record.remote_last_injection_error = null;
         record.remote_last_resume_at = null;
         record.remote_last_resume_error = null;
+        record.remote_worker_pid = null;
+        record.remote_worker_log_path = null;
+        record.remote_worker_started_at = null;
+        record.remote_worker_last_error = null;
       });
     } else {
       // 새 세션: 토픽 생성
@@ -114,6 +136,7 @@ export class SessionManagerImpl implements SessionManager {
 
       this.store.create(session_id, {
         status: 'active',
+        mode: effectiveRemoteEnabled ? 'remote-managed' : 'local',
         chat_id: this.config.groupId,
         project,
         cwd: args.cwd,
@@ -134,14 +157,22 @@ export class SessionManagerImpl implements SessionManager {
         late_reply_received_at: null,
         late_reply_resume_started_at: null,
         late_reply_resume_error: null,
-        remote_mode_enabled: remoteEnabled,
-        remote_endpoint: remoteEnabled ? remote_endpoint : null,
+        remote_mode_enabled: effectiveRemoteEnabled,
+        remote_input_owner: effectiveRemoteEnabled ? 'telegram' : null,
+        remote_status: effectiveRemoteEnabled ? 'attached' : null,
+        remote_endpoint: effectiveRemoteEnabled ? effectiveRemoteEndpoint : null,
         remote_thread_id: resolvedRemoteThreadId,
         remote_last_turn_id: null,
         remote_last_injection_at: null,
         remote_last_injection_error: null,
         remote_last_resume_at: null,
         remote_last_resume_error: null,
+        remote_last_error: null,
+        remote_last_recovery_at: null,
+        remote_worker_pid: null,
+        remote_worker_log_path: null,
+        remote_worker_started_at: null,
+        remote_worker_last_error: null,
       });
     }
 
@@ -186,38 +217,16 @@ export class SessionManagerImpl implements SessionManager {
     if (hasRemoteSessionAttachment(existing.record)) {
       this.store.update(session_id, (record) => {
         record.status = 'active';
+        record.mode = 'remote-managed';
         record.total_turns = total_turns;
         record.last_turn_output = last_message;
-        record.stop_message_id = null;
         record.last_progress_at = null;
         record.last_heartbeat_at = null;
+        if (record.remote_status === 'running') {
+          record.remote_status = 'idle';
+        }
       });
       this.clearHeartbeat(session_id);
-
-      let stopMessageId: number;
-      try {
-        stopMessageId = await this.tg.sendStopMessage(
-          this.config.groupId,
-          existing.record.topic_id,
-          args.turn_id,
-          last_message,
-          total_turns
-        );
-      } catch (err) {
-        this.store.update(session_id, (record) => {
-          record.status = previousState.status;
-          record.total_turns = previousState.total_turns;
-          record.last_turn_output = previousState.last_turn_output;
-          record.stop_message_id = previousState.stop_message_id;
-          record.last_progress_at = previousState.last_progress_at;
-          record.last_heartbeat_at = previousState.last_heartbeat_at;
-        });
-        throw err;
-      }
-
-      this.store.update(session_id, (record) => {
-        record.stop_message_id = stopMessageId;
-      });
 
       return { decision: 'continue' as const };
     }
@@ -225,6 +234,7 @@ export class SessionManagerImpl implements SessionManager {
     // 1. 세션을 waiting으로 전이
     this.store.update(session_id, (record) => {
       record.status = 'waiting';
+      record.mode = 'local';
       record.total_turns = total_turns;
       record.last_turn_output = last_message;
       record.stop_message_id = null;
@@ -241,7 +251,10 @@ export class SessionManagerImpl implements SessionManager {
         existing.record.topic_id,
         args.turn_id,
         last_message,
-        total_turns
+        total_turns,
+        {
+          mode: 'local',
+        }
       );
     } catch (err) {
       this.store.update(session_id, (record) => {
@@ -322,6 +335,13 @@ export class SessionManagerImpl implements SessionManager {
       );
     }
 
+    if (hasRemoteSessionAttachment(existing.record)) {
+      this.store.update(args.session_id, (record) => {
+        record.remote_input_owner = 'telegram';
+      });
+      return;
+    }
+
     await this.tg.sendWorkingMessage(
       this.config.groupId,
       existing.record.topic_id
@@ -330,6 +350,10 @@ export class SessionManagerImpl implements SessionManager {
     this.store.update(args.session_id, (record) => {
       record.last_progress_at = new Date().toISOString();
       record.last_heartbeat_at = null;
+      if (record.mode === 'remote-managed') {
+        record.remote_status = 'running';
+        record.remote_last_error = null;
+      }
     });
 
     this.scheduleHeartbeat(args.session_id);

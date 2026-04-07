@@ -6,6 +6,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
     status: 'active',
+    mode: 'remote-managed',
     project: 'test',
     cwd: '/tmp/test',
     model: 'gpt-4.1',
@@ -26,6 +27,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
     remote_mode_enabled: true,
+    remote_input_owner: 'telegram',
+    remote_status: 'attached',
     remote_endpoint: 'ws://127.0.0.1:4321',
     remote_thread_id: 'thread-1',
     remote_last_turn_id: null,
@@ -33,6 +36,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_injection_error: null,
     remote_last_resume_at: null,
     remote_last_resume_error: null,
+    remote_last_error: null,
+    remote_last_recovery_at: null,
+    remote_worker_pid: null,
+    remote_worker_log_path: null,
+    remote_worker_started_at: null,
+    remote_worker_last_error: null,
     ...overrides,
   };
 }
@@ -42,8 +51,14 @@ describe('RemoteStopController', () => {
   let client: any;
   let fallback: any;
   let runtime: any;
+  let workerRuntime: any;
   let notifyDelivered: any;
   let notifyFailed: any;
+  let notifyRecovering: any;
+  let publishTurnOutput: any;
+  let settleTurnDeferred:
+    | { promise: Promise<{ status: string | null }>; resolve: (value: { status: string | null }) => void }
+    | null;
 
   beforeEach(() => {
     const sessions: Record<string, SessionRecord> = {
@@ -65,6 +80,12 @@ describe('RemoteStopController', () => {
         mode: 'start',
         turnId: 'turn-2',
       }),
+      waitForTurnToSettle: vi.fn().mockImplementation(() => {
+        if (settleTurnDeferred) {
+          return settleTurnDeferred.promise;
+        }
+        return new Promise(() => {});
+      }),
       resumeThread: vi.fn().mockResolvedValue({
         threadId: 'thread-1',
       }),
@@ -75,15 +96,27 @@ describe('RemoteStopController', () => {
     runtime = {
       ensureAvailable: vi.fn().mockResolvedValue(true),
     };
+    workerRuntime = {
+      ensureAttached: vi.fn().mockResolvedValue({
+        started: true,
+        pid: 4242,
+        logPath: '/tmp/remote-worker.log',
+      }),
+    };
     notifyDelivered = vi.fn().mockResolvedValue(undefined);
     notifyFailed = vi.fn().mockResolvedValue(undefined);
+    notifyRecovering = vi.fn().mockResolvedValue(undefined);
+    publishTurnOutput = vi.fn().mockResolvedValue(900);
+    settleTurnDeferred = null;
   });
 
   it('injects into app-server instead of launching late-reply resume for remote sessions', async () => {
     store._sessions.s1.remote_last_resume_error = 'stale resume error';
-    const controller = new RemoteStopController(store, client, fallback, runtime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
       notifyDelivered,
       notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
     });
 
     const result = await controller.handleReply('s1', 'continue here');
@@ -98,19 +131,30 @@ describe('RemoteStopController', () => {
       threadId: 'thread-1',
       replyText: 'continue here',
     });
+    expect(workerRuntime.ensureAttached).toHaveBeenCalledWith({
+      sessionId: 's1',
+      endpoint: 'ws://127.0.0.1:4321',
+      cwd: '/tmp/test',
+      knownPid: null,
+      knownLogPath: null,
+    });
     expect(fallback.handle).not.toHaveBeenCalled();
     expect(notifyDelivered).toHaveBeenCalledWith('s1');
     expect(store._sessions.s1.remote_last_turn_id).toBe('turn-2');
     expect(store._sessions.s1.remote_last_resume_error).toBeNull();
+    expect(store._sessions.s1.remote_status).toBe('running');
+    expect(store._sessions.s1.remote_last_error).toBeNull();
   });
 
   it('falls back to late-reply resume when remote injection fails', async () => {
     client.injectReply.mockRejectedValueOnce(new Error('socket closed'));
     runtime.ensureAvailable.mockRejectedValueOnce(new Error('restart failed'));
     client.resumeThread.mockRejectedValueOnce(new Error('resume failed'));
-    const controller = new RemoteStopController(store, client, fallback, runtime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
       notifyDelivered,
       notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
     });
 
     const result = await controller.handleReply('s1', 'continue here');
@@ -120,10 +164,15 @@ describe('RemoteStopController', () => {
       mode: 'fallback',
     });
     expect(fallback.handle).toHaveBeenCalledWith('s1', 'continue here');
+    expect(notifyRecovering).toHaveBeenNthCalledWith(1, 's1', 'reconnect');
+    expect(notifyRecovering).toHaveBeenNthCalledWith(2, 's1', 'resume');
+    expect(notifyRecovering).toHaveBeenNthCalledWith(3, 's1', 'fallback');
     expect(notifyDelivered).not.toHaveBeenCalled();
     expect(notifyFailed).toHaveBeenCalledWith('s1', 'resume failed');
     expect(store._sessions.s1.remote_last_injection_error).toBe('restart failed');
     expect(store._sessions.s1.remote_last_resume_error).toBe('resume failed');
+    expect(store._sessions.s1.remote_status).toBe('degraded');
+    expect(store._sessions.s1.remote_last_error).toBe('resume failed');
   });
 
   it('restarts app-server and retries remote injection before falling back', async () => {
@@ -134,9 +183,11 @@ describe('RemoteStopController', () => {
         turnId: 'turn-3',
       });
 
-    const controller = new RemoteStopController(store, client, fallback, runtime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
       notifyDelivered,
       notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
     });
 
     const result = await controller.handleReply('s1', 'continue after restart');
@@ -152,9 +203,12 @@ describe('RemoteStopController', () => {
     );
     expect(client.injectReply).toHaveBeenCalledTimes(2);
     expect(fallback.handle).not.toHaveBeenCalled();
+    expect(notifyRecovering).toHaveBeenCalledWith('s1', 'reconnect');
     expect(notifyDelivered).toHaveBeenCalledWith('s1');
     expect(store._sessions.s1.remote_last_turn_id).toBe('turn-3');
     expect(store._sessions.s1.remote_last_injection_error).toBeNull();
+    expect(store._sessions.s1.remote_last_error).toBeNull();
+    expect(store._sessions.s1.remote_last_recovery_at).not.toBeNull();
   });
 
   it('resumes the remote thread and retries injection before local fallback', async () => {
@@ -166,9 +220,11 @@ describe('RemoteStopController', () => {
         turnId: 'turn-9',
       });
 
-    const controller = new RemoteStopController(store, client, fallback, runtime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
       notifyDelivered,
       notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
     });
 
     const result = await controller.handleReply('s1', 'recover remotely');
@@ -189,7 +245,51 @@ describe('RemoteStopController', () => {
     });
     expect(client.injectReply).toHaveBeenCalledTimes(3);
     expect(fallback.handle).not.toHaveBeenCalled();
+    expect(notifyRecovering).toHaveBeenNthCalledWith(1, 's1', 'reconnect');
+    expect(notifyRecovering).toHaveBeenNthCalledWith(2, 's1', 'resume');
     expect(store._sessions.s1.remote_last_resume_at).not.toBeNull();
     expect(store._sessions.s1.remote_last_resume_error).toBeNull();
+    expect(store._sessions.s1.remote_status).toBe('running');
+    expect(store._sessions.s1.remote_last_error).toBeNull();
+  });
+
+  it('marks the remote session idle once the injected turn settles', async () => {
+    let resolve!: (value: { status: string | null }) => void;
+    settleTurnDeferred = {
+      promise: new Promise((r) => {
+        resolve = r;
+      }),
+      resolve,
+    };
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+      notifyDelivered,
+      notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
+    });
+
+    const result = await controller.handleReply('s1', 'continue here');
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+    expect(store._sessions.s1.remote_status).toBe('running');
+
+    settleTurnDeferred.resolve({ status: 'completed', outputText: 'remote answer' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store._sessions.s1.remote_status).toBe('idle');
+    expect(store._sessions.s1.remote_last_error).toBeNull();
+    expect(store._sessions.s1.total_turns).toBe(2);
+    expect(store._sessions.s1.last_turn_output).toBe('remote answer');
+    expect(store._sessions.s1.stop_message_id).toBe(900);
+    expect(publishTurnOutput).toHaveBeenCalledWith('s1', {
+      turnId: 'turn-2',
+      outputText: 'remote answer',
+      totalTurns: 2,
+    });
   });
 });

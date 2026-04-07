@@ -90,6 +90,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
     status: 'active',
+    mode: 'local',
     project: 'test',
     cwd: '/tmp/test',
     model: 'gpt-4',
@@ -110,6 +111,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
     remote_mode_enabled: false,
+    remote_input_owner: null,
+    remote_status: null,
     remote_endpoint: null,
     remote_thread_id: null,
     remote_last_turn_id: null,
@@ -117,6 +120,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_injection_error: null,
     remote_last_resume_at: null,
     remote_last_resume_error: null,
+    remote_last_error: null,
+    remote_last_recovery_at: null,
+    remote_worker_pid: null,
+    remote_worker_log_path: null,
+    remote_worker_started_at: null,
+    remote_worker_last_error: null,
     ...overrides,
   };
 }
@@ -179,7 +188,10 @@ describe('SessionManagerImpl', () => {
       expect(store.create).toHaveBeenCalledWith(
         'remote-thread-1',
         expect.objectContaining({
+          mode: 'remote-managed',
           remote_mode_enabled: true,
+          remote_input_owner: 'telegram',
+          remote_status: 'attached',
           remote_endpoint: 'ws://127.0.0.1:8899',
           remote_thread_id: 'remote-thread-1',
         })
@@ -324,7 +336,7 @@ describe('SessionManagerImpl', () => {
       expect(replyQueue.waitFor).not.toHaveBeenCalled();
     });
 
-    it('returns continue immediately for remote-attached sessions without touching ReplyQueue.waitFor', async () => {
+    it('returns continue immediately for remote-attached sessions without touching ReplyQueue.waitFor or sending a stop message', async () => {
       store._sessions['s1'] = makeRecord({
         status: 'active',
         topic_id: 42,
@@ -343,15 +355,10 @@ describe('SessionManagerImpl', () => {
 
       expect(result).toEqual({ decision: 'continue' });
       expect(replyQueue.waitFor).not.toHaveBeenCalled();
-      expect(tg.sendStopMessage).toHaveBeenCalledWith(
-        defaultConfig.groupId,
-        42,
-        't1',
-        'remote stop output',
-        3
-      );
+      expect(tg.sendStopMessage).not.toHaveBeenCalled();
       expect(store._sessions['s1'].status).toBe('active');
-      expect(store._sessions['s1'].stop_message_id).toBe(200);
+      expect(store._sessions['s1'].remote_status).toBeNull();
+      expect(store._sessions['s1'].stop_message_id).toBeNull();
     });
   });
 
@@ -438,6 +445,26 @@ describe('SessionManagerImpl', () => {
 
       expect(tg.sendWorkingMessage).toHaveBeenCalledWith(defaultConfig.groupId, 42);
       expect(store._sessions['s1'].last_progress_at).not.toBeNull();
+    });
+
+    it('does not emit a working Telegram message for remote-managed sessions', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+        mode: 'remote-managed',
+        remote_mode_enabled: true,
+        remote_input_owner: 'telegram',
+        remote_status: 'idle',
+        remote_endpoint: 'ws://127.0.0.1:4321',
+        remote_thread_id: 'thread-1',
+      });
+
+      await manager.handleWorking({
+        session_id: 's1',
+      });
+
+      expect(tg.sendWorkingMessage).not.toHaveBeenCalled();
+      expect(store._sessions['s1'].remote_status).toBe('idle');
     });
 
     it('sends throttled heartbeat messages after working starts', async () => {

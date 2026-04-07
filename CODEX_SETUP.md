@@ -300,6 +300,7 @@ source checkout이 꼭 필요한 경우에만, 그 사실을 별도로 명시해
 - `codex app-server --listen ws://127.0.0.1:<port>`
 - Codex TUI를 `codex --remote ws://127.0.0.1:<port>`로 시작
 - 실험용 hook wrapper를 통해 SessionStart에서 remote endpoint를 주입
+- TL 세션은 `local hook mode`가 아니라 `remote managed mode`로 동작한다.
 
 권장 흐름:
 
@@ -309,7 +310,13 @@ codex app-server --listen ws://127.0.0.1:8791
 codex --remote ws://127.0.0.1:8791 --dangerously-bypass-approvals-and-sandbox
 ```
 
-이 모드에서는 새 SessionStart가 자동으로 `remote_mode_enabled=true`, `remote_thread_id=session_id`로 기록된다. 검증은 아래처럼 한다.
+이 모드에서는 새 SessionStart가 자동으로 아래 상태를 가진다.
+
+- `mode=remote-managed`
+- `remote_status=attached`
+- `remote_thread_id=session_id`
+
+검증은 아래처럼 한다.
 
 ```bash
 tl remote status
@@ -337,6 +344,14 @@ tl remote status <session_id>
 4. 그래도 실패하면 `thread/resume`
 5. resume 후 같은 thread에 재주입 재시도
 6. 전부 실패하면 마지막 fallback으로 기존 local late-reply resume
+
+Telegram에서 보이는 의미도 달라진다.
+
+- stop 메시지 footer에 `mode: remote-managed`가 표시된다.
+- reply 전달 성공: `delivered to live remote thread`
+- reconnect 단계: `remote reconnecting...`
+- thread recovery 단계: `recovering remote thread...`
+- 마지막 local fallback: `remote recovery failed, falling back to resume`
 
 중요 제약:
 

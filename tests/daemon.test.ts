@@ -204,6 +204,7 @@ describe('daemon entrypoint', () => {
   it('attaches remote thread metadata through the daemon endpoint', async () => {
     const session = {
       status: 'active',
+      mode: 'local',
       chat_id: -1001234567890,
       project: 'test',
       cwd: '/tmp/test',
@@ -225,6 +226,8 @@ describe('daemon entrypoint', () => {
       late_reply_resume_started_at: null,
       late_reply_resume_error: null,
       remote_mode_enabled: false,
+      remote_input_owner: null,
+      remote_status: null,
       remote_endpoint: null,
       remote_thread_id: null,
       remote_last_turn_id: null,
@@ -232,6 +235,12 @@ describe('daemon entrypoint', () => {
       remote_last_injection_error: null,
       remote_last_resume_at: null,
       remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: null,
+      remote_worker_pid: null,
+      remote_worker_log_path: null,
+      remote_worker_started_at: null,
+      remote_worker_last_error: null,
     };
     const store = {
       get: vi.fn(() => ({ id: 's1', record: session })),
@@ -261,6 +270,9 @@ describe('daemon entrypoint', () => {
     expect(await response.json()).toEqual({
       status: 'attached',
       session_id: 's1',
+      mode: 'remote-managed',
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
       endpoint: 'ws://127.0.0.1:4321',
       thread_id: 'thread-1',
       remote_mode_enabled: true,
@@ -270,9 +282,225 @@ describe('daemon entrypoint', () => {
     expect(store.save).toHaveBeenCalledTimes(1);
   });
 
+  it('starts a daemon-owned remote session and injects the initial prompt', async () => {
+    const session = {
+      status: 'active',
+      mode: 'remote-managed',
+      chat_id: -1001234567890,
+      project: 'poc',
+      cwd: '/tmp/poc',
+      model: 'gpt-5.4',
+      topic_id: 77,
+      start_message_id: 100,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      stop_message_id: null,
+      reply_message_id: null,
+      total_turns: 0,
+      last_user_message: '',
+      last_turn_output: '',
+      last_progress_at: null,
+      last_heartbeat_at: null,
+      last_resume_ack_at: null,
+      late_reply_text: null,
+      late_reply_received_at: null,
+      late_reply_resume_started_at: null,
+      late_reply_resume_error: null,
+      remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
+      remote_endpoint: 'ws://127.0.0.1:9901',
+      remote_thread_id: 'thread-1',
+      remote_last_turn_id: null,
+      remote_last_injection_at: null,
+      remote_last_injection_error: null,
+      remote_last_resume_at: null,
+      remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: null,
+      remote_worker_pid: 9001,
+      remote_worker_log_path: '/tmp/thread-1.log',
+      remote_worker_started_at: new Date().toISOString(),
+      remote_worker_last_error: null,
+    };
+    const store = {
+      get: vi.fn((id: string) => (id === 'thread-1' ? { id, record: session } : undefined)),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+    };
+    const sessionManager = {
+      handleSessionStart: vi.fn().mockResolvedValue(undefined),
+    };
+    const appServerRuntime = {
+      ensureAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const appServerClient = {
+      createThread: vi.fn().mockResolvedValue({ threadId: 'thread-1' }),
+    };
+    const remoteWorkerRuntime = {};
+    const remoteStopController = {
+      ensureWorkerAttached: vi.fn().mockResolvedValue(undefined),
+      handleReply: vi.fn().mockResolvedValue({
+        handled: true,
+        mode: 'remote',
+        turnId: 'turn-1',
+      }),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: {} as any,
+      sessionManager: sessionManager as any,
+      remoteStopController: remoteStopController as any,
+      appServerClient: appServerClient as any,
+      appServerRuntime: appServerRuntime as any,
+      remoteWorkerRuntime: remoteWorkerRuntime as any,
+    });
+
+    const response = await app.request('http://localhost/remote/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/poc',
+        model: 'gpt-5.4',
+        initial_text: 'hello remote',
+        project: 'poc',
+        endpoint: 'ws://127.0.0.1:9901',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: 'started',
+      session_id: 'thread-1',
+      topic_id: 77,
+      mode: 'remote-managed',
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
+      turn_id: 'turn-1',
+    });
+    expect(appServerRuntime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:9901', '/tmp/poc');
+    expect(appServerClient.createThread).toHaveBeenCalled();
+    expect(remoteStopController.ensureWorkerAttached).toHaveBeenCalledWith(
+      'thread-1',
+      'ws://127.0.0.1:9901',
+      '/tmp/poc'
+    );
+    expect(sessionManager.handleSessionStart.mock.invocationCallOrder[0]).toBeLessThan(
+      remoteStopController.ensureWorkerAttached.mock.invocationCallOrder[0]
+    );
+    expect(sessionManager.handleSessionStart).toHaveBeenCalledWith({
+      session_id: 'thread-1',
+      model: 'gpt-5.4',
+      turn_id: '',
+      project: 'poc',
+      cwd: '/tmp/poc',
+      last_user_message: 'hello remote',
+      remote_endpoint: 'ws://127.0.0.1:9901',
+      remote_thread_id: 'thread-1',
+    });
+    expect(remoteStopController.handleReply).toHaveBeenCalledWith('thread-1', 'hello remote');
+  });
+
+  it('falls back to cwd basename when remote start project is empty', async () => {
+    const session = {
+      status: 'active',
+      mode: 'remote-managed',
+      chat_id: -1001234567890,
+      project: 'feat-remote-app-server-stop-poc',
+      cwd: '/Users/flowkater/Projects/TL/.worktrees/feat-remote-app-server-stop-poc',
+      model: 'gpt-5.4',
+      topic_id: 88,
+      start_message_id: 101,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      stop_message_id: null,
+      reply_message_id: null,
+      total_turns: 0,
+      last_user_message: '',
+      last_turn_output: '',
+      last_progress_at: null,
+      last_heartbeat_at: null,
+      last_resume_ack_at: null,
+      late_reply_text: null,
+      late_reply_received_at: null,
+      late_reply_resume_started_at: null,
+      late_reply_resume_error: null,
+      remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
+      remote_endpoint: 'ws://127.0.0.1:9902',
+      remote_thread_id: 'thread-2',
+      remote_last_turn_id: null,
+      remote_last_injection_at: null,
+      remote_last_injection_error: null,
+      remote_last_resume_at: null,
+      remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: null,
+      remote_worker_pid: 9002,
+      remote_worker_log_path: '/tmp/thread-2.log',
+      remote_worker_started_at: new Date().toISOString(),
+      remote_worker_last_error: null,
+    };
+    const store = {
+      get: vi.fn((id: string) => (id === 'thread-2' ? { id, record: session } : undefined)),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+    };
+    const sessionManager = {
+      handleSessionStart: vi.fn().mockResolvedValue(undefined),
+    };
+    const appServerRuntime = {
+      ensureAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const appServerClient = {
+      createThread: vi.fn().mockResolvedValue({ threadId: 'thread-2' }),
+    };
+    const remoteStopController = {
+      ensureWorkerAttached: vi.fn().mockResolvedValue(undefined),
+      handleReply: vi.fn().mockResolvedValue(null),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: {} as any,
+      sessionManager: sessionManager as any,
+      remoteStopController: remoteStopController as any,
+      appServerClient: appServerClient as any,
+      appServerRuntime: appServerRuntime as any,
+      remoteWorkerRuntime: {} as any,
+    });
+
+    const response = await app.request('http://localhost/remote/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/Users/flowkater/Projects/TL/.worktrees/feat-remote-app-server-stop-poc',
+        model: 'gpt-5.4',
+        initial_text: '',
+        project: '',
+        endpoint: 'ws://127.0.0.1:9902',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(sessionManager.handleSessionStart).toHaveBeenCalledWith({
+      session_id: 'thread-2',
+      model: 'gpt-5.4',
+      turn_id: '',
+      project: 'feat-remote-app-server-stop-poc',
+      cwd: '/Users/flowkater/Projects/TL/.worktrees/feat-remote-app-server-stop-poc',
+      last_user_message: '',
+      remote_endpoint: 'ws://127.0.0.1:9902',
+      remote_thread_id: 'thread-2',
+    });
+  });
+
   it('returns remote resume diagnostics in remote status responses', async () => {
     const session = {
       status: 'active',
+      mode: 'remote-managed',
       chat_id: -1001234567890,
       project: 'test',
       cwd: '/tmp/test',
@@ -294,6 +522,8 @@ describe('daemon entrypoint', () => {
       late_reply_resume_started_at: null,
       late_reply_resume_error: null,
       remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
       remote_endpoint: 'ws://127.0.0.1:4321',
       remote_thread_id: 'thread-1',
       remote_last_turn_id: 'turn-7',
@@ -301,6 +531,12 @@ describe('daemon entrypoint', () => {
       remote_last_injection_error: null,
       remote_last_resume_at: '2026-04-06T13:45:00.000Z',
       remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: '2026-04-06T13:45:00.000Z',
+      remote_worker_pid: 777,
+      remote_worker_log_path: '/tmp/worker.log',
+      remote_worker_started_at: '2026-04-06T13:44:00.000Z',
+      remote_worker_last_error: null,
     };
     const store = {
       get: vi.fn(() => ({ id: 's1', record: session })),
@@ -320,12 +556,21 @@ describe('daemon entrypoint', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       session_id: 's1',
+      mode: 'remote-managed',
       remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
       endpoint: 'ws://127.0.0.1:4321',
       thread_id: 'thread-1',
+      cwd: '/tmp/test',
       last_turn_id: 'turn-7',
+      last_error: null,
+      last_recovery_at: '2026-04-06T13:45:00.000Z',
       last_resume_at: '2026-04-06T13:45:00.000Z',
       last_resume_error: null,
+      worker_pid: 777,
+      worker_log_path: '/tmp/worker.log',
+      worker_last_error: null,
       attached: true,
     });
   });

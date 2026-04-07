@@ -11,6 +11,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
     status: 'active',
+    mode: 'local',
     project: 'test',
     cwd: '/tmp/test',
     model: 'gpt-4.1',
@@ -31,6 +32,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
     remote_mode_enabled: false,
+    remote_input_owner: null,
+    remote_status: null,
     remote_endpoint: null,
     remote_thread_id: null,
     remote_last_turn_id: null,
@@ -38,6 +41,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_injection_error: null,
     remote_last_resume_at: null,
     remote_last_resume_error: null,
+    remote_last_error: null,
+    remote_last_recovery_at: null,
+    remote_worker_pid: null,
+    remote_worker_log_path: null,
+    remote_worker_started_at: null,
+    remote_worker_last_error: null,
     ...overrides,
   };
 }
@@ -69,7 +78,9 @@ describe('remote-mode helpers', () => {
 
     ensureRemoteSessionDefaults(legacyRecord);
 
+    expect(legacyRecord.mode).toBe('local');
     expect(legacyRecord.remote_mode_enabled).toBe(false);
+    expect(legacyRecord.remote_status).toBeNull();
     expect(legacyRecord.remote_endpoint).toBeNull();
     expect(legacyRecord.remote_thread_id).toBeNull();
     expect(legacyRecord.remote_last_turn_id).toBeNull();
@@ -85,6 +96,8 @@ describe('remote-mode helpers', () => {
     });
 
     expect(hasRemoteSessionAttachment(record)).toBe(true);
+    expect(record.mode).toBe('remote-managed');
+    expect(record.remote_status).toBe('attached');
     expect(record.remote_endpoint).toBe('ws://127.0.0.1:4321');
     expect(record.remote_thread_id).toBe('thread-1');
     expect(record.remote_last_turn_id).toBe('turn-9');
@@ -92,6 +105,8 @@ describe('remote-mode helpers', () => {
     clearRemoteSession(record);
 
     expect(hasRemoteSessionAttachment(record)).toBe(false);
+    expect(record.mode).toBe('local');
+    expect(record.remote_status).toBeNull();
     expect(record.remote_endpoint).toBeNull();
     expect(record.remote_thread_id).toBeNull();
     expect(record.remote_last_turn_id).toBeNull();

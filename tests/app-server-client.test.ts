@@ -212,4 +212,104 @@ describe('AppServerClient', () => {
       },
     ]);
   });
+
+  it('waits until a remote turn settles before reporting completion', async () => {
+    const connection = new FakeConnection();
+    let readCount = 0;
+    connection.request = async (method: string, params: unknown) => {
+      connection.calls.push({ method, params });
+      if (method === 'thread/read') {
+        readCount += 1;
+        return {
+          thread: {
+            id: 'thread-1',
+            turns: [
+              {
+                id: 'turn-9',
+                status: readCount === 1 ? 'inProgress' : 'completed',
+                items: [
+                  {
+                    type: 'agentMessage',
+                    text: 'remote final answer',
+                    phase: 'final_answer',
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    };
+
+    const factory: AppServerConnectionFactory = async () => connection;
+    const client = new AppServerClient(factory);
+
+    const result = await client.waitForTurnToSettle({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      turnId: 'turn-9',
+      pollIntervalMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toEqual({
+      status: 'inProgress',
+      outputText: 'remote final answer',
+    });
+    expect(connection.calls).toEqual([
+      {
+        method: 'thread/read',
+        params: { threadId: 'thread-1', includeTurns: true },
+      },
+    ]);
+  });
+
+  it('treats agent final_answer output as deliverable before status flips', async () => {
+    const connection = new FakeConnection();
+    connection.request = async (method: string, params: unknown) => {
+      connection.calls.push({ method, params });
+      if (method === 'thread/read') {
+        return {
+          thread: {
+            id: 'thread-1',
+            turns: [
+              {
+                id: 'turn-10',
+                status: 'inProgress',
+                items: [
+                  {
+                    type: 'userMessage',
+                    content: [{ type: 'text', text: 'hello', text_elements: [] }],
+                  },
+                  {
+                    type: 'agentMessage',
+                    text: 'telegram-first output',
+                    phase: 'final_answer',
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    };
+
+    const factory: AppServerConnectionFactory = async () => connection;
+    const client = new AppServerClient(factory);
+
+    const result = await client.waitForTurnToSettle({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      turnId: 'turn-10',
+      pollIntervalMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toEqual({
+      status: 'inProgress',
+      outputText: 'telegram-first output',
+    });
+  });
 });

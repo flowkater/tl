@@ -97,6 +97,52 @@ describe('TelegramBot.init', () => {
     );
   });
 
+  it('renders local stop footer when local mode metadata is provided', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 123 });
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage } };
+
+    await bot.sendStopMessage(config.groupId, 42, 'turn-1', 'finished', 7, {
+      mode: 'local',
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      '✅ Turn 7 완료\n\nfinished\n\n<i>mode: local-hook</i>',
+      {
+        message_thread_id: 42,
+        parse_mode: 'HTML',
+      }
+    );
+  });
+
+  it('renders remote stop footer with mode and remote state', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 124 });
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage } };
+
+    await bot.sendStopMessage(config.groupId, 42, 'turn-1', 'finished', 7, {
+      mode: 'remote-managed',
+      remoteStatus: 'idle',
+      remoteOwner: 'telegram',
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      '✅ Turn 7 완료\n\nfinished\n\n<i>mode: remote-managed · owner: telegram · state: idle</i>',
+      {
+        message_thread_id: 42,
+        parse_mode: 'HTML',
+      }
+    );
+  });
+
   it('sends the full stop message without appending the default follow-up prompt', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 123 });
     const bot = new TelegramBot(config, { listActive: () => [] } as any, {
@@ -204,6 +250,45 @@ describe('TelegramBot.init', () => {
       {
         message_thread_id: 42,
       }
+    );
+  });
+
+  it('sends remote delivery and recovery messages as plain topic messages', async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ message_id: 920 })
+      .mockResolvedValueOnce({ message_id: 921 })
+      .mockResolvedValueOnce({ message_id: 922 });
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage } };
+
+    const deliveredId = await bot.sendRemoteDeliveredMessage(config.groupId, 42);
+    const reconnectId = await bot.sendRemoteRecoveryMessage(config.groupId, 42, 'reconnect');
+    const fallbackId = await bot.sendRemoteRecoveryMessage(config.groupId, 42, 'fallback');
+
+    expect(deliveredId).toBe(920);
+    expect(reconnectId).toBe(921);
+    expect(fallbackId).toBe(922);
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      config.groupId,
+      '✅ delivered to live remote thread',
+      { message_thread_id: 42 }
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      config.groupId,
+      '⚠️ remote reconnecting...',
+      { message_thread_id: 42 }
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      3,
+      config.groupId,
+      '⚠️ remote recovery failed, falling back to resume',
+      { message_thread_id: 42 }
     );
   });
 
@@ -430,8 +515,11 @@ describe('TelegramBot.init', () => {
           record: {
             topic_id: 42,
             status: 'active',
+            mode: 'remote-managed',
             stop_message_id: 77,
             remote_mode_enabled: true,
+            remote_input_owner: 'telegram',
+            remote_status: 'idle',
             remote_endpoint: 'ws://127.0.0.1:4321',
             remote_thread_id: 'thread-1',
             remote_last_resume_at: null,

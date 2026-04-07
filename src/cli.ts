@@ -539,6 +539,12 @@ async function cmdRemote(args: string[]) {
   if (subcommand === 'detach') {
     return cmdRemoteDetach(args.slice(1));
   }
+  if (subcommand === 'start') {
+    return cmdRemoteStart(args.slice(1));
+  }
+  if (subcommand === 'open') {
+    return cmdRemoteOpen(args.slice(1));
+  }
   if (subcommand === 'inject') {
     return cmdRemoteInject(args.slice(1));
   }
@@ -548,6 +554,8 @@ async function cmdRemote(args: string[]) {
 
   console.log('Usage: tl remote enable --endpoint <ws-url>');
   console.log('       tl remote disable');
+  console.log('       tl remote start --cwd <dir> [--model <model>] [--text <message>] [--project <name>] [--endpoint <ws-url>]');
+  console.log('       tl remote open <session_id>');
   console.log('       tl remote attach <session_id> --thread <thread_id> --endpoint <ws-url>');
   console.log('       tl remote detach <session_id>');
   console.log('       tl remote inject <session_id> --text <message>');
@@ -671,6 +679,117 @@ async function cmdRemoteDetach(args: string[]) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdRemoteStart(args: string[]) {
+  let cwd = '';
+  let model = 'gpt-5.4';
+  let text = '';
+  let project = '';
+  let endpoint = '';
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--cwd') {
+      cwd = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--model') {
+      model = args[i + 1] ?? model;
+      i += 1;
+      continue;
+    }
+    if (arg === '--text') {
+      text = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--project') {
+      project = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--endpoint') {
+      endpoint = args[i + 1] ?? '';
+      i += 1;
+    }
+  }
+
+  if (!cwd) {
+    process.stderr.write('Usage: tl remote start --cwd <dir> [--model <model>] [--text <message>] [--project <name>] [--endpoint <ws-url>]\n');
+    process.exit(1);
+  }
+
+  const resolvedEndpoint = endpoint || loadConfig().remoteCodexEndpoint || '';
+  if (!resolvedEndpoint) {
+    process.stderr.write('Remote endpoint is required. Use tl remote enable --endpoint <ws-url> or pass --endpoint.\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/remote/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cwd,
+      model,
+      initial_text: text,
+      project: project.trim().length > 0 ? project : undefined,
+      endpoint: resolvedEndpoint,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdRemoteOpen(args: string[]) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    process.stderr.write('Usage: tl remote open <session_id>\n');
+    process.exit(1);
+  }
+
+  const url = new URL(`http://localhost:${getHookPort()}/remote/status`);
+  url.searchParams.set('session_id', sessionId);
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  if (!data.endpoint) {
+    process.stderr.write(`Session ${sessionId} is not remote-attached\n`);
+    process.exit(1);
+  }
+
+  const child = spawn(
+    'codex',
+    [
+      'resume',
+      '--remote',
+      data.endpoint,
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--no-alt-screen',
+      sessionId,
+    ],
+    {
+      cwd: data.cwd ?? process.cwd(),
+      stdio: 'inherit',
+    }
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    child.on('exit', (code) => {
+      process.exit(code ?? 0);
+    });
+    child.on('error', reject);
+  });
+}
+
 async function cmdRemoteStatus(args: string[]) {
   if (!args[0]) {
     const config = loadConfig();
@@ -703,7 +822,7 @@ async function cmdRemoteStatus(args: string[]) {
       configured_endpoint: config.remoteCodexEndpoint ?? null,
       wrapper_path: TL_REMOTE_SESSION_START_WRAPPER_PATH,
       session_start_command: sessionStartCommand,
-      attached_sessions: data.sessions ?? [],
+        attached_sessions: data.sessions ?? [],
     }, null, 2));
     return;
   }
@@ -945,6 +1064,8 @@ Usage:
   tl plugin status             Show the local Codex TL plugin status
   tl remote enable ...         Enable experimental remote app-server mode
   tl remote disable            Disable experimental remote app-server mode
+  tl remote start ...          Start a daemon-owned Telegram-first remote session
+  tl remote open <session_id>  Open an attached remote Codex client for a managed session
   tl remote attach ...         Attach a TL session to a Codex app-server thread
   tl remote detach <session_id>  Remove remote attachment from a TL session
   tl remote inject ...         Inject a reply into a remote-attached session

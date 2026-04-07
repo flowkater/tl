@@ -1,8 +1,18 @@
 // ===== 영속화 상태 (sessions.json에 저장) =====
 export type SessionStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
+export type SessionMode = 'local' | 'remote-managed';
+export type RemoteInputOwner = 'telegram' | 'tui';
+export type RemoteSessionStatus =
+  | 'attached'
+  | 'running'
+  | 'idle'
+  | 'injecting'
+  | 'recovering'
+  | 'degraded';
 
 export interface SessionRecord {
   status: SessionStatus;
+  mode: SessionMode;
   chat_id?: number | null;     // Telegram chat/group ID
   project: string;             // cwd
   cwd: string;                 // 작업 디렉토리
@@ -24,6 +34,8 @@ export interface SessionRecord {
   late_reply_resume_started_at: string | null;
   late_reply_resume_error: string | null;
   remote_mode_enabled: boolean;
+  remote_input_owner: RemoteInputOwner | null;
+  remote_status: RemoteSessionStatus | null;
   remote_endpoint: string | null;
   remote_thread_id: string | null;
   remote_last_turn_id: string | null;
@@ -31,6 +43,12 @@ export interface SessionRecord {
   remote_last_injection_error: string | null;
   remote_last_resume_at: string | null;
   remote_last_resume_error: string | null;
+  remote_last_error: string | null;
+  remote_last_recovery_at: string | null;
+  remote_worker_pid: number | null;
+  remote_worker_log_path: string | null;
+  remote_worker_started_at: string | null;
+  remote_worker_last_error: string | null;
 }
 
 export interface SessionsFile {

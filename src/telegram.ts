@@ -2,7 +2,13 @@
 import https from 'node:https';
 import path from 'path';
 import { Bot, Context } from 'grammy';
-import { DaemonConfig, SessionRecord } from './types.js';
+import {
+  DaemonConfig,
+  RemoteInputOwner,
+  RemoteSessionStatus,
+  SessionMode,
+  SessionRecord,
+} from './types.js';
 import { ReplyQueue } from './reply-queue.js';
 import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
@@ -122,7 +128,12 @@ export class TelegramBot {
     topicId: number,
     _turnId: string,
     lastMessage: string,
-    totalTurns: number
+    totalTurns: number,
+    options?: {
+      mode?: SessionMode;
+      remoteStatus?: RemoteSessionStatus | null;
+      remoteOwner?: RemoteInputOwner | null;
+    }
   ): Promise<number> {
     if (!this.bot) throw new Error('Bot not initialized');
 
@@ -133,7 +144,18 @@ export class TelegramBot {
 
     let lastMessageId = 0;
     for (const [index, chunk] of bodyChunks.entries()) {
-      const rendered = this.renderStopChunk(chunk, totalTurns, index === 0);
+      const rendered = this.renderStopChunk(
+        chunk,
+        totalTurns,
+        index === 0,
+        index === bodyChunks.length - 1
+          ? this.renderStopFooter(
+            options?.mode,
+            options?.remoteStatus ?? null,
+            options?.remoteOwner ?? null
+          )
+          : null
+      );
       const msg = await this.sendMessageWithRetry(chatId, rendered, {
         message_thread_id: topicId,
         parse_mode: 'HTML',
@@ -184,6 +206,57 @@ export class TelegramBot {
     const msg = await this.sendMessageWithRetry(
       chatId,
       '✅ reply delivered to Codex, resuming...',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
+  async sendRemoteDeliveredMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '✅ delivered to live remote thread',
+      {
+        message_thread_id: topicId,
+      }
+    );
+    return msg.message_id;
+  }
+
+  async sendRemoteRecoveryMessage(
+    chatId: number,
+    topicId: number,
+    phase: 'reconnect' | 'resume' | 'fallback'
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const text = phase === 'reconnect'
+      ? '⚠️ remote reconnecting...'
+      : phase === 'resume'
+        ? '⚠️ recovering remote thread...'
+        : '⚠️ remote recovery failed, falling back to resume';
+
+    const msg = await this.sendMessageWithRetry(chatId, text, {
+      message_thread_id: topicId,
+    });
+    return msg.message_id;
+  }
+
+  async sendRemoteUnavailableMessage(
+    chatId: number,
+    topicId: number
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(
+      chatId,
+      '⚠️ remote delivery unavailable. Check TL remote status or retry after recovery.',
       {
         message_thread_id: topicId,
       }
@@ -386,6 +459,19 @@ export class TelegramBot {
     allowLateReplyFromActive: boolean,
     sourceThreadId?: number
   ): Promise<void> {
+    if (this.isTelegramFirstRemoteSession(matched.record)) {
+      const handled = await this.routeRemoteManagedMessage(
+        matched,
+        replyText,
+        chatId,
+        messageId,
+        sourceThreadId
+      );
+      if (handled) {
+        return;
+      }
+    }
+
     if (this.remoteReplyHandler) {
       try {
         const handled = await this.remoteReplyHandler(matched.id, replyText);
@@ -453,6 +539,41 @@ export class TelegramBot {
     );
   }
 
+  private async routeRemoteManagedMessage(
+    matched: { id: string; record: SessionRecord },
+    replyText: string,
+    chatId: number,
+    messageId: number,
+    sourceThreadId?: number
+  ): Promise<boolean> {
+    if (!this.remoteReplyHandler) {
+      await this.sendRemoteUnavailableMessage(
+        chatId,
+        sourceThreadId ?? matched.record.topic_id
+      );
+      return true;
+    }
+
+    try {
+      const handled = await this.remoteReplyHandler(matched.id, replyText);
+      if (handled) {
+        await this.addReaction(chatId, messageId, this.config.emojiReaction);
+        return true;
+      }
+    } catch (err) {
+      logger.warn('Remote managed delivery failed', {
+        sessionId: matched.id,
+        error: (err as Error).message,
+      });
+    }
+
+    await this.sendRemoteUnavailableMessage(
+      chatId,
+      sourceThreadId ?? matched.record.topic_id
+    );
+    return true;
+  }
+
   private matchReplyToSession(
     repliedToMessageId: number
   ): { id: string; record: SessionRecord } | null {
@@ -497,6 +618,7 @@ export class TelegramBot {
   }
 
   private getSessionRecencyMs(record: SessionRecord): number {
+    const modeRank = this.isTelegramFirstRemoteSession(record) ? 10 : 0;
     const statusRank = record.status === 'waiting'
       ? 3
       : record.status === 'active'
@@ -509,7 +631,7 @@ export class TelegramBot {
       : record.started_at;
     const parsed = Date.parse(effectiveAt);
     const timestamp = Number.isNaN(parsed) ? 0 : parsed;
-    return (timestamp * 10) + statusRank;
+    return (timestamp * 100) + (modeRank * 10) + statusRank;
   }
 
   private async sendChatLevelMessage(chatId: number, text: string): Promise<void> {
@@ -619,7 +741,8 @@ export class TelegramBot {
   private renderStopChunk(
     body: string,
     totalTurns: number,
-    includeHeader: boolean
+    includeHeader: boolean,
+    footer: string | null
   ): string {
     const parts: string[] = [];
 
@@ -629,8 +752,32 @@ export class TelegramBot {
     if (body) {
       parts.push(this.renderTelegramStopBody(body));
     }
+    if (footer) {
+      parts.push(footer);
+    }
 
     return parts.join('\n\n');
+  }
+
+  private renderStopFooter(
+    mode?: SessionMode,
+    remoteStatus?: RemoteSessionStatus | null,
+    remoteOwner?: RemoteInputOwner | null
+  ): string | null {
+    if (!mode) {
+      return null;
+    }
+
+    if (mode === 'local') {
+      return '<i>mode: local-hook</i>';
+    }
+
+    const ownerSuffix = remoteOwner ? ` · owner: ${this.escapeHtml(remoteOwner)}` : '';
+    if (remoteStatus) {
+      return `<i>mode: remote-managed${ownerSuffix} · state: ${this.escapeHtml(remoteStatus)}</i>`;
+    }
+
+    return `<i>mode: remote-managed${ownerSuffix}</i>`;
   }
 
   private renderTelegramStopBody(text: string): string {
@@ -665,6 +812,10 @@ export class TelegramBot {
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;');
+  }
+
+  private isTelegramFirstRemoteSession(record: SessionRecord): boolean {
+    return record.mode === 'remote-managed' && record.remote_input_owner === 'telegram';
   }
 
   async stop(): Promise<void> {

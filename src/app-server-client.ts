@@ -10,6 +10,7 @@ type JsonRpcResponse = {
 type ThreadTurn = {
   id: string;
   status?: string;
+  items?: unknown[];
 };
 
 export interface AppServerConnection {
@@ -28,6 +29,18 @@ export type RemoteInjectResult = {
 
 export type RemoteResumeResult = {
   threadId: string;
+};
+
+export type RemoteTurnSettlement = {
+  status: string | null;
+  outputText: string;
+};
+
+type ThreadReadResult = {
+  thread?: {
+    turns?: ThreadTurn[];
+  };
+  unavailableBeforeFirstUserMessage?: boolean;
 };
 
 type PendingRequest = {
@@ -262,6 +275,61 @@ export class AppServerClient {
     }
   }
 
+  async waitForTurnToSettle(args: {
+    endpoint: string;
+    threadId: string;
+    turnId: string;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<RemoteTurnSettlement> {
+    const connection = await this.connectionFactory(args.endpoint);
+    const timeoutMs = args.timeoutMs ?? 120_000;
+    const pollIntervalMs = args.pollIntervalMs ?? 1_000;
+    const deadline = Date.now() + timeoutMs;
+
+    try {
+      while (true) {
+        const threadRead = await this.readThreadSafe(connection, args.threadId, {
+          tolerateUnavailableTurns: true,
+        });
+        if (threadRead.unavailableBeforeFirstUserMessage) {
+          if (Date.now() >= deadline) {
+            throw new Error(`Timed out waiting for remote turn to materialize: ${args.turnId}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          continue;
+        }
+        const turns = Array.isArray(threadRead?.thread?.turns)
+          ? (threadRead.thread.turns as ThreadTurn[])
+          : [];
+        const matched = [...turns].reverse().find((turn) => turn.id === args.turnId);
+        const outputText = matched ? extractAssistantText(matched.items) : '';
+        if (matched && (matched.status !== 'inProgress' || outputText.length > 0)) {
+          return {
+            status: matched.status ?? null,
+            outputText,
+          };
+        }
+
+        const activeTurn = turns.some((turn) => turn.status === 'inProgress');
+        if (!matched && !activeTurn) {
+          return {
+            status: null,
+            outputText: '',
+          };
+        }
+
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for remote turn to settle: ${args.turnId}`);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    } finally {
+      await connection.close();
+    }
+  }
+
   async createThread(args: {
     endpoint: string;
     cwd?: string;
@@ -289,8 +357,11 @@ export class AppServerClient {
 
   private async readThreadSafe(
     connection: AppServerConnection,
-    threadId: string
-  ): Promise<{ thread?: { turns?: ThreadTurn[] } }> {
+    threadId: string,
+    options: {
+      tolerateUnavailableTurns?: boolean;
+    } = {}
+  ): Promise<ThreadReadResult> {
     try {
       return await connection.request('thread/read', {
         threadId,
@@ -299,6 +370,14 @@ export class AppServerClient {
     } catch (err) {
       const message = (err as Error).message;
       if (message.includes('includeTurns is unavailable before first user message')) {
+        if (options.tolerateUnavailableTurns) {
+          return {
+            unavailableBeforeFirstUserMessage: true,
+            thread: {
+              turns: [],
+            },
+          };
+        }
         return {
           thread: {
             turns: [],
@@ -308,4 +387,67 @@ export class AppServerClient {
       throw err;
     }
   }
+}
+
+function extractAssistantText(items: unknown[] | undefined): string {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '';
+  }
+
+  const texts: string[] = [];
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    if (
+      record.type === 'agentMessage' &&
+      typeof record.text === 'string' &&
+      record.text.trim().length > 0
+    ) {
+      texts.push(record.text.trim());
+      return;
+    }
+
+    if (
+      record.type === 'output_text' &&
+      typeof record.text === 'string' &&
+      record.text.trim().length > 0
+    ) {
+      texts.push(record.text.trim());
+      return;
+    }
+
+    for (const nested of Object.values(record)) {
+      visit(nested);
+    }
+  };
+
+  visit(items);
+
+  return dedupePreservingOrder(texts).join('\n\n');
+}
+
+function dedupePreservingOrder(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+
+  return result;
 }

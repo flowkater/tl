@@ -10,6 +10,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
     status: 'active',
+    mode: 'local',
     project: 'test',
     cwd: '/tmp/test',
     model: 'gpt-5',
@@ -30,6 +31,8 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
     remote_mode_enabled: false,
+    remote_input_owner: null,
+    remote_status: null,
     remote_endpoint: null,
     remote_thread_id: null,
     remote_last_turn_id: null,
@@ -37,6 +40,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     remote_last_injection_error: null,
     remote_last_resume_at: null,
     remote_last_resume_error: null,
+    remote_last_error: null,
+    remote_last_recovery_at: null,
+    remote_worker_pid: null,
+    remote_worker_log_path: null,
+    remote_worker_started_at: null,
+    remote_worker_last_error: null,
     ...overrides,
   };
 }

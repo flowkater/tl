@@ -16,6 +16,7 @@ import { AppServerClient } from './app-server-client.js';
 import { AppServerRuntimeManager } from './app-server-runtime.js';
 import { RemoteStopController } from './remote-stop-controller.js';
 import { attachRemoteSession, clearRemoteSession, hasRemoteSessionAttachment } from './remote-mode.js';
+import { RemoteWorkerRuntimeManager } from './remote-worker-runtime.js';
 
 const startTime = Date.now();
 
@@ -24,6 +25,9 @@ type DaemonAppDeps = {
   replyQueue: ReplyQueue;
   sessionManager: SessionManagerImpl;
   remoteStopController?: RemoteStopController;
+  appServerClient?: AppServerClient;
+  appServerRuntime?: AppServerRuntimeManager;
+  remoteWorkerRuntime?: RemoteWorkerRuntimeManager;
 };
 
 function getPidPath(): string {
@@ -78,6 +82,9 @@ export function createDaemonApp({
   replyQueue,
   sessionManager,
   remoteStopController,
+  appServerClient,
+  appServerRuntime,
+  remoteWorkerRuntime,
 }: DaemonAppDeps): Hono {
   const app = new Hono();
 
@@ -285,10 +292,80 @@ export function createDaemonApp({
     return c.json({
       status: 'attached',
       session_id: body.session_id,
+      mode: existing.record.mode,
+      remote_input_owner: existing.record.remote_input_owner,
+      remote_status: existing.record.remote_status,
       endpoint: body.endpoint,
       thread_id: body.thread_id,
       remote_mode_enabled: true,
     });
+  });
+
+  app.post('/remote/start', async (c) => {
+    if (!appServerClient || !appServerRuntime || !remoteWorkerRuntime || !remoteStopController) {
+      return c.json({ error: 'Remote managed runtime unavailable' }, 503);
+    }
+
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.cwd || !body.endpoint) {
+      return c.json({ error: 'Missing cwd or endpoint' }, 400);
+    }
+
+    const cwd = body.cwd;
+    const model = body.model ?? 'gpt-5.4';
+    const initialText = typeof body.initial_text === 'string' ? body.initial_text : '';
+    const project = typeof body.project === 'string' && body.project.trim().length > 0
+      ? body.project.trim()
+      : path.basename(cwd);
+
+    try {
+      await appServerRuntime.ensureAvailable(body.endpoint, cwd);
+      const thread = await appServerClient.createThread({
+        endpoint: body.endpoint,
+        cwd,
+      });
+
+      await sessionManager.handleSessionStart({
+        session_id: thread.threadId,
+        model,
+        turn_id: '',
+        project,
+        cwd,
+        last_user_message: initialText,
+        remote_endpoint: body.endpoint,
+        remote_thread_id: thread.threadId,
+      });
+      await store.save();
+      await remoteStopController.ensureWorkerAttached(
+        thread.threadId,
+        body.endpoint,
+        cwd
+      );
+
+      let delivery: Awaited<ReturnType<RemoteStopController['handleReply']>> | null = null;
+      if (initialText.length > 0) {
+        delivery = await remoteStopController.handleReply(thread.threadId, initialText);
+      }
+
+      const created = store.get(thread.threadId);
+      return c.json({
+        status: 'started',
+        session_id: thread.threadId,
+        topic_id: created?.record.topic_id ?? null,
+        mode: created?.record.mode ?? 'remote-managed',
+        remote_input_owner: created?.record.remote_input_owner ?? 'telegram',
+        remote_status: created?.record.remote_status ?? 'attached',
+        turn_id: delivery && 'turnId' in delivery ? delivery.turnId : null,
+      });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
   });
 
   // ===== POST /remote/detach =====
@@ -317,6 +394,9 @@ export function createDaemonApp({
     return c.json({
       status: 'detached',
       session_id: body.session_id,
+      mode: existing.record.mode,
+      remote_input_owner: existing.record.remote_input_owner,
+      remote_status: existing.record.remote_status,
       remote_mode_enabled: false,
     });
   });
@@ -361,12 +441,21 @@ export function createDaemonApp({
 
       return c.json({
         session_id: sessionId,
+        mode: existing.record.mode,
+        remote_input_owner: existing.record.remote_input_owner,
         remote_mode_enabled: existing.record.remote_mode_enabled,
+        remote_status: existing.record.remote_status,
         endpoint: existing.record.remote_endpoint,
         thread_id: existing.record.remote_thread_id,
+        cwd: existing.record.cwd,
         last_turn_id: existing.record.remote_last_turn_id,
+        last_error: existing.record.remote_last_error,
+        last_recovery_at: existing.record.remote_last_recovery_at,
         last_resume_at: existing.record.remote_last_resume_at,
         last_resume_error: existing.record.remote_last_resume_error,
+        worker_pid: existing.record.remote_worker_pid,
+        worker_log_path: existing.record.remote_worker_log_path,
+        worker_last_error: existing.record.remote_worker_last_error,
         attached: hasRemoteSessionAttachment(existing.record),
       });
     }
@@ -376,11 +465,20 @@ export function createDaemonApp({
       .filter(({ record }) => hasRemoteSessionAttachment(record))
       .map(({ id, record }) => ({
         session_id: id,
+        mode: record.mode,
+        remote_input_owner: record.remote_input_owner,
+        remote_status: record.remote_status,
         endpoint: record.remote_endpoint,
         thread_id: record.remote_thread_id,
+        cwd: record.cwd,
         last_turn_id: record.remote_last_turn_id,
+        last_error: record.remote_last_error,
+        last_recovery_at: record.remote_last_recovery_at,
         last_resume_at: record.remote_last_resume_at,
         last_resume_error: record.remote_last_resume_error,
+        worker_pid: record.remote_worker_pid,
+        worker_log_path: record.remote_worker_log_path,
+        worker_last_error: record.remote_worker_last_error,
       }));
 
     return c.json({ sessions });
@@ -533,11 +631,15 @@ async function main() {
   const lateReplyResumer = new LateReplyResumer(store, tg, {
     groupId: config.groupId,
   });
+  const appServerClient = new AppServerClient();
+  const appServerRuntime = new AppServerRuntimeManager();
+  const remoteWorkerRuntime = new RemoteWorkerRuntimeManager();
   const remoteStopController = new RemoteStopController(
     store,
-    new AppServerClient(),
+    appServerClient,
     lateReplyResumer,
-    new AppServerRuntimeManager(),
+    appServerRuntime,
+    remoteWorkerRuntime,
     {
       notifyDelivered: async (sessionId) => {
         const existing = store.get(sessionId);
@@ -545,17 +647,63 @@ async function main() {
           return;
         }
 
-        await tg.sendResumeAckMessage(config.groupId, existing.record.topic_id);
+        await tg.sendRemoteDeliveredMessage(config.groupId, existing.record.topic_id);
         await tg.sendWorkingMessage(config.groupId, existing.record.topic_id);
 
         store.update(sessionId, (record) => {
           const now = new Date().toISOString();
           record.last_resume_ack_at = now;
           record.last_progress_at = now;
+          record.remote_input_owner = 'telegram';
+          record.remote_status = 'running';
+          record.remote_last_error = null;
         });
         await store.save();
       },
-      notifyFailed: async () => {},
+      notifyRecovering: async (sessionId, phase) => {
+        const existing = store.get(sessionId);
+        if (!existing) {
+          return;
+        }
+
+        await tg.sendRemoteRecoveryMessage(
+          config.groupId,
+          existing.record.topic_id,
+          phase
+        );
+      },
+      notifyFailed: async (sessionId, error) => {
+        const existing = store.get(sessionId);
+        if (!existing) {
+          return;
+        }
+
+        store.update(sessionId, (record) => {
+          record.remote_input_owner = 'telegram';
+          record.remote_status = 'degraded';
+          record.remote_last_error = error;
+        });
+        await store.save();
+      },
+      publishTurnOutput: async (sessionId, args) => {
+        const existing = store.get(sessionId);
+        if (!existing) {
+          return null;
+        }
+
+        return await tg.sendStopMessage(
+          config.groupId,
+          existing.record.topic_id,
+          args.turnId,
+          args.outputText,
+          args.totalTurns,
+          {
+            mode: 'remote-managed',
+            remoteStatus: 'idle',
+            remoteOwner: 'telegram',
+          }
+        );
+      },
     }
   );
   tg.setLateReplyHandler((sessionId, replyText) => (
@@ -571,6 +719,9 @@ async function main() {
     replyQueue,
     sessionManager,
     remoteStopController,
+    appServerClient,
+    appServerRuntime,
+    remoteWorkerRuntime,
   });
 
   // HTTP 서버 시작
@@ -589,6 +740,7 @@ async function main() {
     logger.info(`Received ${signal}, shutting down...`);
     replyQueue.shutdown();
     await store.save();
+    remoteWorkerRuntime.stopAll();
     await tg.stop();
     releasePidFile();
     server.close();
