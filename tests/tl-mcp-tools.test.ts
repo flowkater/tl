@@ -32,6 +32,7 @@ describe('createTlMcpTools', () => {
         groupId: -1001234567890,
         stopTimeout: 7200,
         liveStream: false,
+        localCodexEndpoint: 'ws://127.0.0.1:8795',
       },
     });
 
@@ -41,6 +42,7 @@ describe('createTlMcpTools', () => {
       'groupId=-1001234567890',
       'stopTimeout=7200',
       'liveStream=false',
+      'localCodexEndpoint=ws://127.0.0.1:8795',
     ]);
   });
 

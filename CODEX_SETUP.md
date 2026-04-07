@@ -17,7 +17,40 @@ tl plugin install
 tl plugin status
 ```
 
-### B. TL 자체를 수정하거나 테스트해야 할 때만 source checkout
+### B. 자유 전환이 필요한 경우: local-managed 모드
+
+이 경로를 쓰면 같은 Codex 세션을 터미널과 Telegram에서 자유롭게 오갈 수 있다.  
+기존 hook-local처럼 `Stop -> waiting -> reply -> resume`에 묶이지 않는다.
+
+전제:
+
+- TL 설치 완료
+- daemon 실행 중
+- Codex app-server endpoint 준비 (`localCodexEndpoint`, 기본 `ws://127.0.0.1:8795`)
+
+권장 흐름:
+
+```bash
+tl config set localCodexEndpoint=ws://127.0.0.1:8795
+tl stop
+tl start
+tl open --cwd "$PWD" --project my-session
+```
+
+상태 확인:
+
+```bash
+tl local status
+tl local status <session_id>
+```
+
+운영 메모:
+
+- 이 모드는 daemon-owned thread를 사용한다.
+- Telegram 메시지와 터미널 입력이 같은 live session으로 들어간다.
+- `tl resume`은 보통 필요하지 않고, 예외 복구용으로만 남는다.
+
+### C. TL 자체를 수정하거나 테스트해야 할 때만 source checkout
 
 ```bash
 git clone https://github.com/flowkater/tl.git ~/Projects/TL
@@ -75,7 +108,7 @@ tl plugin status
 - `tl_get_config`
 - `tl_set_config`
 
-## 3. hooks 설치 전략
+## 3. hooks 정리 전략
 
 ### 기본 경로
 
@@ -85,50 +118,25 @@ tl init
 
 현재 구현 기준:
 
-- `tl init`은 `~/.codex/hooks.json`을 safe merge한다
-- TL hook가 이미 있으면 no-op이다
-- `tl init --force`만 overwrite다
+- `tl init`은 deprecated TL hook-local entry를 제거한다
+- TL은 더 이상 `SessionStart` / `Stop` direct hook를 기본 설치하지 않는다
+- 기존 `cmux` router나 custom wrapper가 있으면 그대로 유지한다
 
 ### 꼭 확인할 것
 
-1. TL hook가 이미 있는가
-2. custom router/wrapper가 TL을 내부에서 호출하는가
+1. deprecated TL direct hook가 남아 있는가
+2. `cmux` router나 custom wrapper가 정상 엔트리로 잡혀 있는가
 
 운영 원칙:
 
-- TL direct hook와 custom router 내부 TL 호출을 동시에 두지 않는다
-- 최종 graph에서 TL은 `SessionStart` 1회, `Stop` 1회만 남긴다
+- deprecated TL direct hook는 제거한다
+- `cmux`나 custom router가 있으면 그것만 남긴다
 
-### TL 기본 hook 모양
+중요:
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "tl hook-session-start",
-            "statusMessage": "Connecting to Telegram..."
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "tl hook-stop-and-wait",
-            "timeout": 7200
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+- TL의 기본 시작 경로는 이제 `tl open`이다.
+- 같은 live 세션에서 터미널과 Telegram을 자유롭게 오가려면 `local-managed`만 사용한다.
+- 예전 `hook-local`은 deprecated 상태다.
 
 ### optional: working / heartbeat
 
@@ -164,14 +172,14 @@ tl setup --non-interactive
 `tl setup`은:
 
 - `~/.tl/config.json` 저장
-- `~/.codex/hooks.json` safe merge
+- deprecated TL hook-local 제거
 - daemon 재시작
 
 까지 한 번에 처리한다.
 
 ### 자격증명이 아직 없는 경우
 
-hooks만 먼저 설치:
+deprecated hook 정리만 먼저 실행:
 
 ```bash
 tl init
@@ -280,6 +288,8 @@ tl status
 - reply reaction은 Telegram 수신만 의미한다.
 - `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계에서만 전송된다.
 - `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late reply resume fallback이 시도된다.
+- 터미널 ↔ Telegram 자유 전환이 목적이면 hook-local이 아니라 `local-managed`를 써야 한다.
+- `local-managed` 세션은 `tl local start`로 만들고 `tl local open`으로 다시 붙는다.
 
 ## 10. Codex에게 맡기기
 
@@ -291,7 +301,26 @@ codex exec --full-auto "Follow the instructions in https://github.com/flowkater/
 
 source checkout이 꼭 필요한 경우에만, 그 사실을 별도로 명시해서 Codex에게 맡긴다.
 
-## 11. experimental: remote app-server stop path PoC
+## 11. remote/local mode 구분
+
+### Hook-Local
+
+- 일반 Codex 세션 + TL hooks
+- 알림과 reply-resume 중심
+- `waiting`이 정상 흐름 일부
+- 자유 전환 용도에는 부적합
+
+### Local-Managed
+
+- TL daemon이 app-server thread를 소유
+- 터미널과 Telegram이 같은 live thread를 공유
+- 자유 전환 권장 경로
+
+### Remote-Managed
+
+- Codex 자체를 remote/app-server 중심으로 운용하는 실험 경로
+
+## 12. experimental: remote app-server stop path PoC
 
 이 섹션은 아직 실험 경로다. 기본 TL 설치 흐름은 local mode를 유지하고, 아래는 같은 live remote thread에 reply를 다시 주입하는 PoC를 다룬다.
 

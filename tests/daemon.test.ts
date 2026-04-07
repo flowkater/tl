@@ -402,6 +402,202 @@ describe('daemon entrypoint', () => {
     expect(remoteStopController.handleReply).toHaveBeenCalledWith('thread-1', 'hello remote');
   });
 
+  it('starts a daemon-owned local managed session on the configured local endpoint', async () => {
+    const session = {
+      status: 'active',
+      mode: 'remote-managed',
+      chat_id: -1001234567890,
+      project: 'poc',
+      cwd: '/tmp/poc',
+      model: 'gpt-5.4',
+      topic_id: 91,
+      start_message_id: 100,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      stop_message_id: null,
+      reply_message_id: null,
+      total_turns: 0,
+      last_user_message: '',
+      last_turn_output: '',
+      last_progress_at: null,
+      last_heartbeat_at: null,
+      last_resume_ack_at: null,
+      late_reply_text: null,
+      late_reply_received_at: null,
+      late_reply_resume_started_at: null,
+      late_reply_resume_error: null,
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_input_queue_depth: 0,
+      local_last_input_source: null,
+      local_last_input_at: null,
+      local_last_injection_error: null,
+      local_attachment_id: 'thread-local-1',
+      remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
+      remote_endpoint: 'ws://127.0.0.1:8795',
+      remote_thread_id: 'thread-local-1',
+      remote_last_turn_id: null,
+      remote_last_injection_at: null,
+      remote_last_injection_error: null,
+      remote_last_resume_at: null,
+      remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: null,
+      remote_worker_pid: 9003,
+      remote_worker_log_path: '/tmp/thread-local-1.log',
+      remote_worker_started_at: new Date().toISOString(),
+      remote_worker_last_error: null,
+    };
+    const store = {
+      get: vi.fn((id: string) => (id === 'thread-local-1' ? { id, record: session } : undefined)),
+      update: vi.fn((_id: string, fn: (record: typeof session) => void) => fn(session)),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+    };
+    const sessionManager = {
+      handleSessionStart: vi.fn().mockResolvedValue(undefined),
+    };
+    const appServerRuntime = {
+      ensureAvailable: vi.fn().mockResolvedValue(true),
+    };
+    const appServerClient = {
+      createThread: vi.fn().mockResolvedValue({ threadId: 'thread-local-1' }),
+    };
+    const remoteStopController = {
+      ensureWorkerAttached: vi.fn().mockResolvedValue(undefined),
+      handleReply: vi.fn().mockResolvedValue(null),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: {} as any,
+      sessionManager: sessionManager as any,
+      remoteStopController: remoteStopController as any,
+      appServerClient: appServerClient as any,
+      appServerRuntime: appServerRuntime as any,
+      remoteWorkerRuntime: {} as any,
+      config: {
+        localCodexEndpoint: 'ws://127.0.0.1:8795',
+      } as any,
+    });
+
+    const response = await app.request('http://localhost/local/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/poc',
+        model: 'gpt-5.4',
+        initial_text: '',
+        project: 'poc',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: 'started',
+      session_id: 'thread-local-1',
+      topic_id: 91,
+      mode: 'local-managed',
+      endpoint: 'ws://127.0.0.1:8795',
+      thread_id: 'thread-local-1',
+    });
+    expect(appServerRuntime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:8795', '/tmp/poc');
+    expect(sessionManager.handleSessionStart).toHaveBeenCalledWith({
+      session_id: 'thread-local-1',
+      model: 'gpt-5.4',
+      turn_id: '',
+      project: 'poc',
+      cwd: '/tmp/poc',
+      last_user_message: '',
+      remote_endpoint: 'ws://127.0.0.1:8795',
+      remote_thread_id: 'thread-local-1',
+    });
+  });
+
+  it('returns local managed session status with attachment metadata', async () => {
+    const session = {
+      status: 'active',
+      mode: 'remote-managed',
+      chat_id: -1001234567890,
+      project: 'poc',
+      cwd: '/tmp/poc',
+      model: 'gpt-5.4',
+      topic_id: 91,
+      start_message_id: 100,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      stop_message_id: null,
+      reply_message_id: null,
+      total_turns: 0,
+      last_user_message: '',
+      last_turn_output: '',
+      last_progress_at: null,
+      last_heartbeat_at: null,
+      last_resume_ack_at: null,
+      late_reply_text: null,
+      late_reply_received_at: null,
+      late_reply_resume_started_at: null,
+      late_reply_resume_error: null,
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_input_queue_depth: 0,
+      local_last_input_source: null,
+      local_last_input_at: null,
+      local_last_injection_error: null,
+      local_attachment_id: 'thread-local-1',
+      remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'attached',
+      remote_endpoint: 'ws://127.0.0.1:8795',
+      remote_thread_id: 'thread-local-1',
+      remote_last_turn_id: null,
+      remote_last_injection_at: null,
+      remote_last_injection_error: null,
+      remote_last_resume_at: null,
+      remote_last_resume_error: null,
+      remote_last_error: null,
+      remote_last_recovery_at: null,
+      remote_worker_pid: 9003,
+      remote_worker_log_path: '/tmp/thread-local-1.log',
+      remote_worker_started_at: new Date().toISOString(),
+      remote_worker_last_error: null,
+    };
+    const store = {
+      get: vi.fn(() => ({ id: 'thread-local-1', record: session })),
+      save: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn(() => []),
+      listAll: vi.fn(() => [{ id: 'thread-local-1', record: session }]),
+    };
+
+    const app = createDaemonApp({
+      store: store as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+      config: {
+        localCodexEndpoint: 'ws://127.0.0.1:8795',
+      } as any,
+    });
+
+    const response = await app.request('http://localhost/local/status?session_id=thread-local-1');
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      session_id: 'thread-local-1',
+      mode: 'local-managed',
+      endpoint: 'ws://127.0.0.1:8795',
+      thread_id: 'thread-local-1',
+      topic_id: 91,
+      cwd: '/tmp/poc',
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_attachment_id: 'thread-local-1',
+      remote_status: 'attached',
+      attached: true,
+    });
+  });
+
   it('falls back to cwd basename when remote start project is empty', async () => {
     const session = {
       status: 'active',

@@ -158,6 +158,38 @@ async function findFreePort(): Promise<number> {
   });
 }
 
+async function startServerWithRetries(
+  fetchHandler: Parameters<typeof serve>[0]['fetch'],
+  attempts = 10
+): Promise<{ port: number; server: { close: (cb?: (err?: Error) => void) => void } }> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const port = await findFreePort();
+    try {
+      const server = serve({
+        fetch: fetchHandler,
+        hostname: '127.0.0.1',
+        port,
+      });
+      return {
+        port,
+        server: server as any,
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EADDRINUSE') {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Failed to allocate a daemon port for the E2E harness');
+}
+
 function makeTranscript(entries: Array<[TranscriptPhase, string]>): string {
   const lines: unknown[] = [
     {
@@ -245,24 +277,6 @@ export class TlE2EHarness {
     fs.mkdirSync(configDir, { recursive: true });
     fs.mkdirSync(dataDir, { recursive: true });
 
-    const port = await findFreePort();
-    const config: DaemonConfig = {
-      botToken: 'e2e-token',
-      groupId: -1001234567890,
-      topicPrefix: '🔧',
-      hookPort: port,
-      hookBaseUrl: `http://127.0.0.1:${port}`,
-      stopTimeout: options.stopTimeout ?? 5,
-      liveStream: false,
-      emojiReaction: '👍',
-    };
-
-    fs.writeFileSync(
-      path.join(configDir, 'config.json'),
-      JSON.stringify(config, null, 2),
-      'utf-8'
-    );
-
     const previousEnv = {
       TL_CONFIG_DIR: process.env.TL_CONFIG_DIR,
       TL_DATA_DIR: process.env.TL_DATA_DIR,
@@ -270,6 +284,17 @@ export class TlE2EHarness {
     process.env.TL_CONFIG_DIR = configDir;
     process.env.TL_DATA_DIR = dataDir;
 
+    const config: DaemonConfig = {
+      botToken: 'e2e-token',
+      groupId: -1001234567890,
+      topicPrefix: '🔧',
+      hookPort: 0,
+      hookBaseUrl: '',
+      stopTimeout: options.stopTimeout ?? 5,
+      liveStream: false,
+      emojiReaction: '👍',
+      localCodexEndpoint: 'ws://127.0.0.1:8795',
+    };
     const store = new SessionsStore();
     await store.load();
     const replyQueue = new ReplyQueue();
@@ -280,15 +305,40 @@ export class TlE2EHarness {
       telegram as any,
       config
     );
+    let localThreadCounter = 0;
     const app = createDaemonApp({
       store,
       replyQueue,
       sessionManager,
+      appServerClient: {
+        createThread: async () => {
+          localThreadCounter += 1;
+          return { threadId: `thread-local-${localThreadCounter}` };
+        },
+      } as any,
+      appServerRuntime: {
+        ensureAvailable: async () => true,
+      } as any,
+      remoteStopController: {
+        ensureWorkerAttached: async () => undefined,
+        handleReply: async (_sessionId: string, _replyText: string) => ({
+          handled: true,
+          mode: 'remote',
+          turnId: 'turn-local-1',
+        }),
+      } as any,
+      remoteWorkerRuntime: {} as any,
+      config,
     });
-    const server = serve({
-      fetch: app.fetch,
-      port,
-    });
+    const { port, server } = await startServerWithRetries(app.fetch);
+    config.hookPort = port;
+    config.hookBaseUrl = `http://127.0.0.1:${port}`;
+
+    fs.writeFileSync(
+      path.join(configDir, 'config.json'),
+      JSON.stringify(config, null, 2),
+      'utf-8'
+    );
 
     return new TlE2EHarness({
       rootDir,

@@ -94,6 +94,35 @@ describe('SessionsStore', () => {
       expect(entry!.record.status).toBe('active');
     });
 
+    it('hydrates missing local bridge defaults for older records', async () => {
+      fs.mkdirSync(testDir, { recursive: true });
+      const sessionsPath = path.join(testDir, 'sessions.json');
+      const legacy = makeRecord();
+      delete (legacy as Partial<SessionRecord>).local_bridge_enabled;
+      delete (legacy as Partial<SessionRecord>).local_bridge_state;
+      delete (legacy as Partial<SessionRecord>).local_input_queue_depth;
+      delete (legacy as Partial<SessionRecord>).local_last_input_source;
+      delete (legacy as Partial<SessionRecord>).local_last_input_at;
+      delete (legacy as Partial<SessionRecord>).local_last_injection_error;
+      delete (legacy as Partial<SessionRecord>).local_attachment_id;
+
+      fs.writeFileSync(sessionsPath, JSON.stringify({
+        sessions: { s1: legacy },
+        version: 1,
+      }));
+
+      await store.load();
+      const entry = store.get('s1');
+      expect(entry).toBeDefined();
+      expect(entry!.record.local_bridge_enabled).toBe(false);
+      expect(entry!.record.local_bridge_state).toBeNull();
+      expect(entry!.record.local_input_queue_depth).toBe(0);
+      expect(entry!.record.local_last_input_source).toBeNull();
+      expect(entry!.record.local_last_input_at).toBeNull();
+      expect(entry!.record.local_last_injection_error).toBeNull();
+      expect(entry!.record.local_attachment_id).toBeNull();
+    });
+
     it('falls back to backup if primary is corrupted', async () => {
       fs.mkdirSync(testDir, { recursive: true });
       const sessionsPath = path.join(testDir, 'sessions.json');

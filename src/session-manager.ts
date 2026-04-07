@@ -240,6 +240,7 @@ export class SessionManagerImpl implements SessionManager {
       record.stop_message_id = null;
       record.last_progress_at = null;
       record.last_heartbeat_at = null;
+      record.remote_input_owner = 'telegram';
     });
     this.clearHeartbeat(session_id);
 

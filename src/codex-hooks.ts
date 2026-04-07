@@ -30,15 +30,24 @@ type EnsureTlHooksInstalledResult = {
   commandsAlreadyPresent: string[];
 };
 
+type RemoveTlHooksResult = {
+  targetPath: string;
+  changed: boolean;
+  backupPath?: string;
+  commandsRemoved: string[];
+};
+
+export const TL_HOOK_WRAPPER_PATH = path.join(os.homedir(), '.codex', 'hooks', 'tl-hook.sh');
+
 export const TL_SESSION_START_HOOK: HookCommand = {
   type: 'command',
-  command: 'tl hook-session-start',
+  command: `${TL_HOOK_WRAPPER_PATH} hook-session-start`,
   statusMessage: 'Connecting to Telegram...',
 };
 
 export const TL_STOP_HOOK: HookCommand = {
   type: 'command',
-  command: 'tl hook-stop-and-wait',
+  command: `${TL_HOOK_WRAPPER_PATH} hook-stop-and-wait`,
   timeout: 7200,
 };
 
@@ -49,7 +58,58 @@ export const TL_REMOTE_SESSION_START_WRAPPER_PATH = path.join(
   'tl-remote-session-start.sh'
 );
 
-export function createRemoteSessionStartHook(wrapperPath = TL_REMOTE_SESSION_START_WRAPPER_PATH): HookCommand {
+const LEGACY_TL_SESSION_START_COMMAND = 'tl hook-session-start';
+const LEGACY_TL_STOP_COMMAND = 'tl hook-stop-and-wait';
+
+export function writeHookRunnerScript(
+  cliScriptPath: string,
+  wrapperPath = TL_HOOK_WRAPPER_PATH,
+  nodeBinary = 'node'
+): string {
+  const wrapperDir = path.dirname(wrapperPath);
+  if (!fs.existsSync(wrapperDir)) {
+    fs.mkdirSync(wrapperDir, { recursive: true });
+  }
+  const safeNodeBinary = nodeBinary.replace(/"/g, '\\"');
+
+  const script = [
+    '#!/usr/bin/env sh',
+    'set -eu',
+    '',
+    'TL_NODE_BIN="\${TL_NODE_BIN:-' + safeNodeBinary + '}"',
+    `TL_CLI_PATH="${cliScriptPath}"`,
+    '',
+    'if [ -n "${CODEX_TL_BIN:-}" ] && command -v "${CODEX_TL_BIN}" >/dev/null 2>&1; then',
+    '  if "${CODEX_TL_BIN}" --help >/dev/null 2>&1; then',
+    '  exec "${CODEX_TL_BIN}" "$@"',
+    '  fi',
+    'fi',
+    '',
+    'if [ -n "${TL_CLI_PATH}" ] && [ -f "${TL_CLI_PATH}" ]; then',
+    '  if "${TL_NODE_BIN}" --version >/dev/null 2>&1; then',
+    '  exec "${TL_NODE_BIN}" "${TL_CLI_PATH}" "$@"',
+    '  fi',
+    'fi',
+    '',
+    'if command -v tl >/dev/null 2>&1; then',
+    '  if tl --help >/dev/null 2>&1; then',
+    '    exec tl "$@"',
+    '  fi',
+    'fi',
+    '',
+    'echo "tl command unavailable. Set CODEX_TL_BIN or TL_CLI_PATH." >&2',
+    'exit 127',
+    '',
+  ].join('\n');
+
+  fs.writeFileSync(wrapperPath, script, { mode: 0o755 });
+  fs.chmodSync(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+export function createRemoteSessionStartHook(
+  wrapperPath = TL_REMOTE_SESSION_START_WRAPPER_PATH
+): HookCommand {
   return {
     type: 'command',
     command: wrapperPath,
@@ -57,7 +117,14 @@ export function createRemoteSessionStartHook(wrapperPath = TL_REMOTE_SESSION_STA
   };
 }
 
-export function createTlHooksTemplate(): HooksFile {
+export function createTlHooksTemplate(
+  cliScriptPath = '',
+  nodeBinary = 'node'
+): HooksFile {
+  if (cliScriptPath) {
+    writeHookRunnerScript(cliScriptPath, TL_HOOK_WRAPPER_PATH, nodeBinary);
+  }
+
   return {
     hooks: {
       SessionStart: [{ hooks: [TL_SESSION_START_HOOK] }],
@@ -66,14 +133,22 @@ export function createTlHooksTemplate(): HooksFile {
   };
 }
 
-export function ensureTlHooksInstalled(targetPath: string): EnsureTlHooksInstalledResult {
+export function ensureTlHooksInstalled(
+  targetPath: string,
+  cliScriptPath = '',
+  nodeBinary = 'node'
+): EnsureTlHooksInstalledResult {
+  if (cliScriptPath) {
+    writeHookRunnerScript(cliScriptPath, TL_HOOK_WRAPPER_PATH, nodeBinary);
+  }
+
   const targetDir = path.dirname(targetPath);
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
   if (!fs.existsSync(targetPath)) {
-    writeJsonAtomic(targetPath, createTlHooksTemplate());
+    writeJsonAtomic(targetPath, createTlHooksTemplate(cliScriptPath, nodeBinary));
     return {
       targetPath,
       changed: true,
@@ -88,21 +163,13 @@ export function ensureTlHooksInstalled(targetPath: string): EnsureTlHooksInstall
   const commandsAlreadyPresent: string[] = [];
   let changed = false;
 
-  changed = ensureHookForEvent(
-    existing,
-    'SessionStart',
-    TL_SESSION_START_HOOK,
-    commandsInstalled,
-    commandsAlreadyPresent
-  ) || changed;
+  changed =
+    ensureHookForEvent(existing, 'SessionStart', TL_SESSION_START_HOOK, commandsInstalled, commandsAlreadyPresent) ||
+    changed;
 
-  changed = ensureHookForEvent(
-    existing,
-    'Stop',
-    TL_STOP_HOOK,
-    commandsInstalled,
-    commandsAlreadyPresent
-  ) || changed;
+  changed =
+    ensureHookForEvent(existing, 'Stop', TL_STOP_HOOK, commandsInstalled, commandsAlreadyPresent) ||
+    changed;
 
   if (!changed) {
     return {
@@ -128,6 +195,77 @@ export function ensureTlHooksInstalled(targetPath: string): EnsureTlHooksInstall
   };
 }
 
+export function removeTlHooks(targetPath: string): RemoveTlHooksResult {
+  if (!fs.existsSync(targetPath)) {
+    return {
+      targetPath,
+      changed: false,
+      commandsRemoved: [],
+    };
+  }
+
+  const hooksFile = parseHooksFile(targetPath);
+  const commandsRemoved: string[] = [];
+  let changed = false;
+
+  for (const eventName of ['SessionStart', 'Stop'] as const) {
+    const originalMatchers = hooksFile.hooks[eventName] ?? [];
+    const normalizedMatchers: HookMatcher[] = [];
+
+    for (const matcher of originalMatchers) {
+      const retainedHooks = matcher.hooks.filter((hook) => {
+        if (hook.type !== 'command') {
+          return true;
+        }
+
+        const shouldRemove = eventName === 'SessionStart'
+          ? isTlSessionStartCommand(hook.command)
+          : isTlStopHookCommand(hook.command);
+
+        if (shouldRemove) {
+          commandsRemoved.push(hook.command);
+          changed = true;
+          return false;
+        }
+
+        return true;
+      });
+
+      if (retainedHooks.length > 0) {
+        normalizedMatchers.push({
+          ...matcher,
+          hooks: retainedHooks,
+        });
+      }
+    }
+
+    if (normalizedMatchers.length > 0) {
+      hooksFile.hooks[eventName] = normalizedMatchers;
+    } else {
+      delete hooksFile.hooks[eventName];
+    }
+  }
+
+  if (!changed) {
+    return {
+      targetPath,
+      changed: false,
+      commandsRemoved: [],
+    };
+  }
+
+  const backupPath = `${targetPath}.backup-${timestampForFilename()}`;
+  fs.copyFileSync(targetPath, backupPath);
+  writeJsonAtomic(targetPath, hooksFile);
+
+  return {
+    targetPath,
+    changed: true,
+    backupPath,
+    commandsRemoved: Array.from(new Set(commandsRemoved)),
+  };
+}
+
 type ConfigureRemoteSessionStartResult = EnsureTlHooksInstalledResult & {
   remoteEnabled: boolean;
   sessionStartCommand: string;
@@ -135,40 +273,42 @@ type ConfigureRemoteSessionStartResult = EnsureTlHooksInstalledResult & {
 
 export function enableRemoteSessionStartHook(
   targetPath: string,
-  wrapperPath = TL_REMOTE_SESSION_START_WRAPPER_PATH
+  wrapperPath = TL_REMOTE_SESSION_START_WRAPPER_PATH,
+  cliScriptPath = '',
+  nodeBinary = 'node'
 ): ConfigureRemoteSessionStartResult {
   const remoteHook = createRemoteSessionStartHook(wrapperPath);
-  return configureSessionStartHook(targetPath, remoteHook, true);
+  return configureSessionStartHook(targetPath, remoteHook, true, cliScriptPath, nodeBinary);
 }
 
 export function disableRemoteSessionStartHook(
-  targetPath: string
+  targetPath: string,
+  cliScriptPath = '',
+  nodeBinary = 'node'
 ): ConfigureRemoteSessionStartResult {
-  return configureSessionStartHook(targetPath, TL_SESSION_START_HOOK, false);
+  return configureSessionStartHook(targetPath, TL_SESSION_START_HOOK, false, cliScriptPath, nodeBinary);
 }
 
 function configureSessionStartHook(
   targetPath: string,
   sessionStartHook: HookCommand,
-  remoteEnabled: boolean
+  remoteEnabled: boolean,
+  cliScriptPath = '',
+  nodeBinary = 'node'
 ): ConfigureRemoteSessionStartResult {
-  const installResult = ensureTlHooksInstalled(targetPath);
+  const installResult = ensureTlHooksInstalled(targetPath, cliScriptPath, nodeBinary);
   const hooksFile = parseHooksFile(targetPath);
   const changedCommands: string[] = [];
   const expectedCommand = sessionStartHook.command;
   const originalMatchers = hooksFile.hooks.SessionStart ?? [];
-  const normalizedMatchers = normalizeSessionStartMatchers(
-    originalMatchers,
-    sessionStartHook
-  );
+  const normalizedMatchers = normalizeSessionStartMatchers(originalMatchers, sessionStartHook);
   hooksFile.hooks.SessionStart = normalizedMatchers;
-  const changed =
-    JSON.stringify(originalMatchers) !== JSON.stringify(normalizedMatchers);
-  if (changed) {
+  const normalized = JSON.stringify(originalMatchers) !== JSON.stringify(normalizedMatchers);
+  if (normalized) {
     changedCommands.push(expectedCommand);
   }
 
-  if (!changed && !installResult.changed) {
+  if (!normalized && !installResult.changed) {
     return {
       ...installResult,
       remoteEnabled,
@@ -176,7 +316,8 @@ function configureSessionStartHook(
     };
   }
 
-  const backupPath = installResult.backupPath ?? `${targetPath}.backup-${timestampForFilename()}`;
+  const backupPath =
+    installResult.backupPath ?? `${targetPath}.backup-${timestampForFilename()}`;
   if (!installResult.backupPath && fs.existsSync(targetPath)) {
     fs.copyFileSync(targetPath, backupPath);
   }
@@ -187,11 +328,10 @@ function configureSessionStartHook(
     changed: true,
     created: installResult.created,
     backupPath,
-    commandsInstalled: Array.from(
-      new Set([...installResult.commandsInstalled, ...changedCommands])
-    ),
+    commandsInstalled: Array.from(new Set([...installResult.commandsInstalled, ...changedCommands])),
     commandsAlreadyPresent: installResult.commandsAlreadyPresent.filter(
-      (command) => command !== TL_SESSION_START_HOOK.command || expectedCommand === TL_SESSION_START_HOOK.command
+      (command) =>
+        command !== TL_SESSION_START_HOOK.command || expectedCommand === TL_SESSION_START_HOOK.command
     ),
     remoteEnabled,
     sessionStartCommand: expectedCommand,
@@ -210,7 +350,7 @@ export function writeRemoteSessionStartWrapper(
   const script = [
     '#!/bin/zsh',
     `export TL_REMOTE_ENDPOINT=${shellQuote(endpoint)}`,
-    'exec tl hook-session-start',
+    `exec ${shellQuote(TL_HOOK_WRAPPER_PATH)} hook-session-start`,
     '',
   ].join('\n');
 
@@ -226,23 +366,58 @@ function ensureHookForEvent(
   commandsInstalled: string[],
   commandsAlreadyPresent: string[]
 ): boolean {
-  const matchers = hooksFile.hooks[eventName] ?? [];
-  const alreadyPresent = matchers.some((matcher) =>
-    matcher.hooks.some(
-      (candidate) =>
-        candidate.type === hook.type &&
-        commandsEquivalent(eventName, candidate.command, hook.command)
-    )
-  );
+  const originalMatchers = hooksFile.hooks[eventName] ?? [];
+  const originalJson = JSON.stringify(originalMatchers);
+  const normalizedMatchers: HookMatcher[] = [];
+  let inserted = false;
+  let hadEquivalent = false;
 
-  if (alreadyPresent) {
+  for (const matcher of originalMatchers) {
+    const normalizedHooks: HookCommand[] = [];
+    let alreadyInsertedThisMatcher = false;
+
+    for (const candidate of matcher.hooks) {
+      const isEquivalent =
+        candidate.type === hook.type &&
+        commandsEquivalent(eventName, candidate.command, hook.command);
+
+      if (!isEquivalent) {
+        normalizedHooks.push(candidate);
+        continue;
+      }
+
+      hadEquivalent = true;
+      if (alreadyInsertedThisMatcher) {
+        continue;
+      }
+      alreadyInsertedThisMatcher = true;
+
+      if (!inserted) {
+        normalizedHooks.push({ ...hook });
+        inserted = true;
+      }
+    }
+
+    if (normalizedHooks.length > 0) {
+      normalizedMatchers.push({ ...matcher, hooks: normalizedHooks });
+    }
+  }
+
+  if (!inserted) {
+    normalizedMatchers.push({ hooks: [hook] });
+  }
+
+  const changed = originalJson !== JSON.stringify(normalizedMatchers);
+  if (!changed) {
     commandsAlreadyPresent.push(hook.command);
     return false;
   }
 
-  matchers.push({ hooks: [hook] });
-  hooksFile.hooks[eventName] = matchers;
+  hooksFile.hooks[eventName] = normalizedMatchers;
   commandsInstalled.push(hook.command);
+  if (!hadEquivalent && eventName === 'SessionStart') {
+    commandsAlreadyPresent.push(hook.command);
+  }
   return true;
 }
 
@@ -315,17 +490,39 @@ function commandsEquivalent(
   if (currentCommand === expectedCommand) {
     return true;
   }
-  if (eventName !== 'SessionStart') {
-    return false;
+
+  if (eventName === 'SessionStart') {
+    return isTlSessionStartCommand(currentCommand) && isTlSessionStartCommand(expectedCommand);
   }
-  return isTlSessionStartCommand(currentCommand) && isTlSessionStartCommand(expectedCommand);
+
+  return isTlStopHookCommand(currentCommand) && isTlStopHookCommand(expectedCommand);
 }
 
 function isTlSessionStartCommand(command: string): boolean {
+  const normalized = normalizeCommandPath(command);
   return (
-    command === TL_SESSION_START_HOOK.command ||
-    command === TL_REMOTE_SESSION_START_WRAPPER_PATH
+    normalized === TL_SESSION_START_HOOK.command ||
+    normalized === `${TL_HOOK_WRAPPER_PATH} hook-session-start` ||
+    normalized === TL_REMOTE_SESSION_START_WRAPPER_PATH ||
+    normalized === LEGACY_TL_SESSION_START_COMMAND ||
+    normalizeCommandPath(LEGACY_TL_SESSION_START_COMMAND) === normalized
   );
+}
+
+function isTlStopHookCommand(command: string): boolean {
+  const normalized = normalizeCommandPath(command);
+  return (
+    normalized === TL_STOP_HOOK.command ||
+    normalized === LEGACY_TL_STOP_COMMAND ||
+    normalizeCommandPath(LEGACY_TL_STOP_COMMAND) === normalized
+  );
+}
+
+function normalizeCommandPath(command: string): string {
+  if (command.startsWith('~/')) {
+    return `${os.homedir()}/${command.slice(2)}`;
+  }
+  return command;
 }
 
 function normalizeSessionStartMatchers(

@@ -22,6 +22,44 @@ English version: [README.md](README.md)
 - subagent `SessionStart`는 무시해서 root 세션만 topic을 연다.
 - 기존 Codex hook graph에는 기본적으로 safe merge로 TL hook를 붙인다.
 
+## 모드
+
+### Local-Managed 모드
+
+터미널과 Telegram을 같은 Codex 세션에서 자유롭게 오가고 싶다면 이 모드를 써야 한다. `Stop -> waiting`에 묶이지 않는 권장 경로다.
+
+- TL이 app-server를 통해 daemon-owned Codex thread를 시작한다.
+- `tl local open`으로 같은 live thread를 터미널에 붙인다.
+- Telegram 메시지와 터미널 입력이 같은 세션으로 들어간다.
+- `tl resume`은 정상 흐름이 아니라 복구용으로만 남는다.
+
+기본 흐름:
+
+```bash
+tl local start --cwd "$PWD" --project my-session
+tl local open <session_id>
+```
+
+상태 확인:
+
+```bash
+tl local status
+tl local status <session_id>
+```
+
+### Hook-Local 모드
+
+기존 Codex hook 기반 흐름이다. 알림 중심 용도로는 여전히 쓸 수 있지만, 같은 live 세션에서 터미널과 Telegram을 자유롭게 오가는 용도로는 적합하지 않다.
+
+- 일반 로컬 Codex 세션에 TL hook가 붙는다.
+- `Stop`에서 `waiting` 상태가 걸릴 수 있다.
+- Telegram reply가 다음 턴 resume을 트리거한다.
+- 터미널에서 계속 입력하면 daemon-owned live bridge가 아니라 원래 로컬 세션과 상호작용하게 된다.
+
+### Remote-Managed 모드
+
+완전히 remote/app-server 중심으로 Codex를 운용하는 실험 경로다.
+
 ## Codex로 설치하기
 
 Codex에게 아래처럼 말하면 된다.
@@ -43,5 +81,6 @@ Follow the instructions in https://github.com/flowkater/tl/blob/main/PROMPTS.md 
 
 - TL은 로컬 전용 bridge다.
 - Topics가 켜진 Telegram group 또는 supergroup이 필요하다.
-- Codex hooks와 로컬 daemon 협업을 전제로 한다.
+- hook 기반 local session과 daemon-owned local-managed session을 모두 지원한다.
+- 터미널 ↔ Telegram 자유 전환은 `tl local start` / `tl local open` 경로에서 제공된다.
 - 기존에 custom router나 wrapper가 있는 복잡한 hook graph는 direct TL hook를 붙이기 전에 수동 검증이 필요할 수 있다.

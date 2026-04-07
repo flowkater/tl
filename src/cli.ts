@@ -9,10 +9,9 @@ import { spawn } from 'child_process';
 import readline from 'readline';
 import { serializeStopHookOutput } from './stop-hook-output.js';
 import {
-  createTlHooksTemplate,
   disableRemoteSessionStartHook,
   enableRemoteSessionStartHook,
-  ensureTlHooksInstalled,
+  removeTlHooks,
   TL_REMOTE_SESSION_START_WRAPPER_PATH,
   writeRemoteSessionStartWrapper,
 } from './codex-hooks.js';
@@ -41,6 +40,10 @@ function getProjectRoot(): string {
   // dist/cli.js → /Users/.../TL/dist/cli.js → dirname → /Users/.../TL/dist → dirname → /Users/.../TL
   const distDir = path.dirname(new URL(import.meta.url).pathname);
   return path.resolve(distDir, '..');
+}
+
+function getCliScriptPath(): string {
+  return path.join(getProjectRoot(), 'dist', 'cli.js');
 }
 
 function getHooksPath(): string {
@@ -85,6 +88,10 @@ async function main() {
       return cmdPlugin(args);
     case 'remote':
       return cmdRemote(args);
+    case 'local':
+      return cmdLocal(args);
+    case 'open':
+      return cmdOpen(args);
     case 'hook-session-start':
       return cmdHookSessionStart();
     case 'hook-stop-and-wait':
@@ -366,23 +373,21 @@ async function cmdSetup(args: string[]) {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
   console.log('\\n✅ Config saved to ~/.tl/config.json');
 
-  // hooks.json 설치
-  console.log('\\n📦 Installing Codex hooks...');
+  // deprecated hook-local 정리
+  console.log('\\n📦 Removing deprecated TL hook-local entries...');
   const targetPath = path.join(os.homedir(), '.codex', 'hooks.json');
   try {
-    const hookInstall = ensureTlHooksInstalled(targetPath);
-    if (hookInstall.created) {
-      console.log(`✅ hooks.json created at ${targetPath}`);
-    } else if (hookInstall.changed) {
-      console.log(`✅ hooks.json updated at ${targetPath}`);
-      if (hookInstall.backupPath) {
-        console.log(`   Backup: ${hookInstall.backupPath}`);
+    const hookRemoval = removeTlHooks(targetPath);
+    if (hookRemoval.changed) {
+      console.log(`✅ Deprecated TL hooks removed from ${targetPath}`);
+      if (hookRemoval.backupPath) {
+        console.log(`   Backup: ${hookRemoval.backupPath}`);
       }
     } else {
-      console.log(`✅ TL hooks already installed in ${targetPath}`);
+      console.log('✅ No deprecated TL hook-local entries found');
     }
   } catch (err) {
-    process.stderr.write(`⚠️  Failed to install hooks.json: ${(err as Error).message}\n`);
+    process.stderr.write(`⚠️  Failed to update hooks.json: ${(err as Error).message}\n`);
   }
 
   // daemon 재시작
@@ -414,38 +419,21 @@ async function cmdSetup(args: string[]) {
   console.log(`   Bot: ${botToken.slice(0, 10)}...`);
   console.log(`   Group: ${groupId}`);
   console.log(`   Hook: ${hookBaseUrl}`);
-  console.log('\\nVerify: send /tl-status in your Telegram group, then start a new root Codex session.');
+  console.log('\\nVerify: run `tl open`, then confirm Codex attaches and Telegram receives updates.');
 }
 
 // ===== tl init =====
 function cmdInit() {
   const targetPath = path.join(os.homedir(), '.codex', 'hooks.json');
-  const force = args.includes('--force');
-
-  if (fs.existsSync(targetPath) && !force) {
-    const result = ensureTlHooksInstalled(targetPath);
-    if (result.changed) {
-      console.log(`hooks.json updated at ${targetPath}`);
-      if (result.backupPath) {
-        console.log(`Backup created at ${result.backupPath}`);
-      }
-    } else {
-      console.log(`TL hooks already installed in ${targetPath}`);
+  const result = removeTlHooks(targetPath);
+  if (result.changed) {
+    console.log(`Deprecated TL hook-local entries removed from ${targetPath}`);
+    if (result.backupPath) {
+      console.log(`Backup created at ${result.backupPath}`);
     }
     return;
   }
-
-  const targetDir = path.dirname(targetPath);
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
-
-  fs.writeFileSync(
-    targetPath,
-    JSON.stringify(createTlHooksTemplate(), null, 2),
-    'utf-8'
-  );
-  console.log(`hooks.json installed to ${targetPath}`);
+  console.log('No deprecated TL hook-local entries found');
 }
 
 // ===== tl config =====
@@ -562,6 +550,134 @@ async function cmdRemote(args: string[]) {
   console.log('       tl remote status [session_id]');
 }
 
+async function cmdLocal(args: string[]) {
+  const subcommand = args[0];
+  if (subcommand === 'start') {
+    return cmdLocalStart(args.slice(1));
+  }
+  if (subcommand === 'open') {
+    return cmdLocalOpen(args.slice(1));
+  }
+  if (subcommand === 'status') {
+    return cmdLocalStatus(args.slice(1));
+  }
+
+  console.log('Usage: tl local start --cwd <dir> [--model <model>] [--text <message>] [--project <name>] [--endpoint <ws-url>]');
+  console.log('       tl local open <session_id>');
+  console.log('       tl local status [session_id]');
+}
+
+async function ensureDaemonRunning() {
+  const pidPath = getPidPath();
+  if (fs.existsSync(pidPath)) {
+    const existingPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+    try {
+      process.kill(existingPid, 0);
+      return;
+    } catch {
+      try {
+        fs.unlinkSync(pidPath);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const daemonPath = path.join(getProjectRoot(), 'dist', 'daemon.js');
+  if (!fs.existsSync(daemonPath)) {
+    throw new Error('Daemon not built. Run: npm run build');
+  }
+
+  const child = spawn('node', [daemonPath], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+
+async function openManagedSession(sessionId: string, endpoint: string, cwd?: string) {
+  const child = spawn(
+    'codex',
+    [
+      'resume',
+      '--remote',
+      endpoint,
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--no-alt-screen',
+      sessionId,
+    ],
+    {
+      cwd: cwd ?? process.cwd(),
+      stdio: 'inherit',
+    }
+  );
+
+  await new Promise<void>((_resolve, reject) => {
+    child.on('exit', (code) => {
+      process.exit(code ?? 0);
+    });
+    child.on('error', reject);
+  });
+}
+
+async function cmdOpen(args: string[]) {
+  let cwd = process.cwd();
+  let model = 'gpt-5.4';
+  let text = '';
+  let project = '';
+  let endpoint = '';
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--cwd') {
+      cwd = args[i + 1] ?? cwd;
+      i += 1;
+      continue;
+    }
+    if (arg === '--model') {
+      model = args[i + 1] ?? model;
+      i += 1;
+      continue;
+    }
+    if (arg === '--text') {
+      text = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--project') {
+      project = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--endpoint') {
+      endpoint = args[i + 1] ?? '';
+      i += 1;
+    }
+  }
+
+  await ensureDaemonRunning();
+
+  const res = await fetch(`http://localhost:${getHookPort()}/local/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cwd,
+      model,
+      initial_text: text,
+      project: project.trim().length > 0 ? project : undefined,
+      endpoint: endpoint || undefined,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  await openManagedSession(data.session_id, data.endpoint, cwd);
+}
+
 async function cmdRemoteEnable(args: string[]) {
   let endpoint = '';
   for (let i = 0; i < args.length; i += 1) {
@@ -579,7 +695,12 @@ async function cmdRemoteEnable(args: string[]) {
 
   saveConfig({ remoteCodexEndpoint: endpoint });
   const wrapperPath = writeRemoteSessionStartWrapper(endpoint);
-  const hookResult = enableRemoteSessionStartHook(getHooksPath(), wrapperPath);
+  const hookResult = enableRemoteSessionStartHook(
+    getHooksPath(),
+    wrapperPath,
+    getCliScriptPath(),
+    process.execPath
+  );
 
   console.log(JSON.stringify({
     status: 'enabled',
@@ -593,7 +714,11 @@ async function cmdRemoteEnable(args: string[]) {
 
 async function cmdRemoteDisable() {
   saveConfig({ remoteCodexEndpoint: null });
-  const hookResult = disableRemoteSessionStartHook(getHooksPath());
+  const hookResult = disableRemoteSessionStartHook(
+    getHooksPath(),
+    getCliScriptPath(),
+    process.execPath
+  );
 
   console.log(JSON.stringify({
     status: 'disabled',
@@ -881,6 +1006,106 @@ async function cmdRemoteInject(args: string[]) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdLocalStart(args: string[]) {
+  let cwd = '';
+  let model = 'gpt-5.4';
+  let text = '';
+  let project = '';
+  let endpoint = '';
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--cwd') {
+      cwd = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--model') {
+      model = args[i + 1] ?? model;
+      i += 1;
+      continue;
+    }
+    if (arg === '--text') {
+      text = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--project') {
+      project = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--endpoint') {
+      endpoint = args[i + 1] ?? '';
+      i += 1;
+    }
+  }
+
+  if (!cwd) {
+    process.stderr.write('Usage: tl local start --cwd <dir> [--model <model>] [--text <message>] [--project <name>] [--endpoint <ws-url>]\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/local/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cwd,
+      model,
+      initial_text: text,
+      project: project.trim().length > 0 ? project : undefined,
+      endpoint: endpoint || undefined,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdLocalOpen(args: string[]) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    process.stderr.write('Usage: tl local open <session_id>\n');
+    process.exit(1);
+  }
+
+  const url = new URL(`http://localhost:${getHookPort()}/local/status`);
+  url.searchParams.set('session_id', sessionId);
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  if (!data.endpoint) {
+    process.stderr.write(`Session ${sessionId} is not local-managed\n`);
+    process.exit(1);
+  }
+
+  await openManagedSession(sessionId, data.endpoint, data.cwd);
+}
+
+async function cmdLocalStatus(args: string[]) {
+  const url = new URL(`http://localhost:${getHookPort()}/local/status`);
+  if (args[0]) {
+    url.searchParams.set('session_id', args[0]);
+  }
+
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
 // ===== tl hook-session-start =====
 async function cmdHookSessionStart() {
   const port = getHookPort();
@@ -1050,6 +1275,7 @@ function cmdHelp() {
 tl — Codex ↔ Telegram Bridge
 
 Usage:
+  tl open ...                  Start and attach a local-managed Codex session
   tl start                     Start the daemon
   tl stop                      Stop the daemon
   tl status                    Show daemon status
@@ -1057,7 +1283,7 @@ Usage:
   tl resume <session_id>       Resume a waiting session
   tl setup                     Interactive setup wizard
   tl setup --non-interactive   Setup with env vars (TL_BOT_TOKEN, etc.)
-  tl init [--force]            Merge TL hooks into ~/.codex/hooks.json (overwrite only with --force)
+  tl init                      Remove deprecated TL hook-local entries from ~/.codex/hooks.json
   tl config get [KEY]          Show config
   tl config set KEY=VALUE      Set config value
   tl plugin install            Install the local Codex TL plugin
@@ -1070,6 +1296,9 @@ Usage:
   tl remote detach <session_id>  Remove remote attachment from a TL session
   tl remote inject ...         Inject a reply into a remote-attached session
   tl remote status [session_id]  Show remote attachment status
+  tl local start ...           Start a daemon-owned local managed session
+  tl local open <session_id>   Open a console attached to a local managed session
+  tl local status [session_id] Show local managed session status
   tl help                      Show this help
 
 Internal (used by Codex hooks):

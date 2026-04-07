@@ -12,6 +12,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
   'stopTimeout',
   'liveStream',
   'emojiReaction',
+  'localCodexEndpoint',
 ]);
 
 interface CommandResult {

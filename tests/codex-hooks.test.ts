@@ -10,6 +10,7 @@ import {
   createRemoteSessionStartHook,
   TL_SESSION_START_HOOK,
   TL_STOP_HOOK,
+  writeHookRunnerScript,
   writeRemoteSessionStartWrapper,
 } from '../src/codex-hooks.js';
 
@@ -107,6 +108,47 @@ describe('codex hooks installer', () => {
       TL_STOP_HOOK.command,
     ]);
     expect(result.commandsInstalled).toEqual([]);
+  });
+
+  it('replaces legacy tl commands in hooks.json with local wrapper commands', () => {
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [{ hooks: [{ type: 'command', command: 'tl hook-session-start' }] }],
+            Stop: [{ hooks: [{ type: 'command', command: 'tl hook-stop-and-wait' }] }],
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const result = ensureTlHooksInstalled(hooksPath, '/app/project/dist/cli.js');
+
+    expect(result.changed).toBe(true);
+    expect(result.commandsInstalled).toContain(TL_SESSION_START_HOOK.command);
+    expect(result.commandsInstalled).toContain(TL_STOP_HOOK.command);
+
+    const saved = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    expect(saved.hooks.SessionStart[0].hooks[0]).toEqual(TL_SESSION_START_HOOK);
+    expect(saved.hooks.Stop[0].hooks[0]).toEqual(TL_STOP_HOOK);
+  });
+
+  it('creates the hook runner script when cliScriptPath is provided', () => {
+    const wrapperPath = path.join(testDir, 'tl-hook.sh');
+    const cliPath = path.join(testDir, 'dist', 'cli.js');
+    try {
+      expect(fs.existsSync(wrapperPath)).toBe(false);
+      writeHookRunnerScript(cliPath, wrapperPath);
+      expect(fs.existsSync(wrapperPath)).toBe(true);
+      const script = fs.readFileSync(wrapperPath, 'utf-8');
+      expect(script).toContain('tl command unavailable');
+      expect(script).toContain(`"${cliPath}"`);
+    } finally {
+      fs.rmSync(wrapperPath, { force: true });
+    }
   });
 
   it('switches SessionStart to the remote wrapper command when remote mode is enabled', () => {

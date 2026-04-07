@@ -2,6 +2,8 @@
 export type SessionStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
 export type SessionMode = 'local' | 'remote-managed';
 export type RemoteInputOwner = 'telegram' | 'tui';
+export type LocalBridgeState = 'attached' | 'detached' | 'recovering';
+export type LocalInputSource = 'console' | 'telegram';
 export type RemoteSessionStatus =
   | 'attached'
   | 'running'
@@ -33,6 +35,13 @@ export interface SessionRecord {
   late_reply_received_at: string | null;
   late_reply_resume_started_at: string | null;
   late_reply_resume_error: string | null;
+  local_bridge_enabled?: boolean;
+  local_bridge_state?: LocalBridgeState | null;
+  local_input_queue_depth?: number;
+  local_last_input_source?: LocalInputSource | null;
+  local_last_input_at?: string | null;
+  local_last_injection_error?: string | null;
+  local_attachment_id?: string | null;
   remote_mode_enabled: boolean;
   remote_input_owner: RemoteInputOwner | null;
   remote_status: RemoteSessionStatus | null;
@@ -147,6 +156,7 @@ export interface DaemonConfig {
   stopTimeout: number;         // 기본: 7200 (초)
   liveStream: boolean;         // 기본: false
   emojiReaction: string;       // 기본: '👍'
+  localCodexEndpoint?: string | null; // daemon-owned local managed endpoint
   remoteCodexEndpoint?: string | null; // experimental remote app-server endpoint
 }
 

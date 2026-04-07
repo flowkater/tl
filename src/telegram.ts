@@ -425,7 +425,7 @@ export class TelegramBot {
           replyText.trim(),
           ctx.chat.id,
           message.message_id,
-          false,
+          true,
           message.message_thread_id
         );
         return;

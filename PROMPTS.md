@@ -8,6 +8,7 @@
 - TL을 실제로 설치한다.
 - TL local plugin/MCP tool까지 붙인다.
 - 기존 Codex hook 환경을 망가뜨리지 않는다.
+- 자유 전환이 필요하면 `local-managed` 경로까지 안내한다.
 - repo가 없어도 바로 설치되고, 필요할 때만 source checkout을 받는다.
 
 ## 바로 쓰는 방법
@@ -43,21 +44,24 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - source checkout이 꼭 필요할 때만 clone한다.
 
 원칙 2. 기존 Codex hook 환경을 망가뜨리지 마라.
-- `~/.codex/hooks.json`이 없으면 TL hook를 설치한다.
-- `~/.codex/hooks.json`이 있으면 안전 병합한다.
-- TL hook가 이미 있으면 중복 추가하지 않는다.
-- `tl init --force`는 마지막 수단이다.
+- TL은 더 이상 deprecated `hook-local`을 기본 설치하지 않는다.
+- `tl init`은 남아 있는 TL direct hook를 제거하는 정리 명령이다.
+- `cmux` router나 custom wrapper가 있으면 그것을 유지한다.
 
-원칙 3. TL hook는 최종 graph에서 이벤트당 정확히 한 번만 존재해야 한다.
-- `SessionStart` -> `tl hook-session-start` 1회
-- `Stop` -> `tl hook-stop-and-wait` 1회
-- optional `UserPromptSubmit` -> `tl hook-working` 1회
+원칙 3. 기본 시작 경로는 `tl open`이다.
+- `tl open`은 daemon-owned `local-managed` 세션을 만들고 곧바로 Codex에 attach한다.
+- 자유 전환은 이 경로를 기준으로 설명하라.
 
 원칙 4. `TL_BOT_TOKEN`과 `TL_GROUP_ID`가 없으면 설치까지만 하고 멈춰라.
 - interactive 입력을 강요하지 마라.
 - 다음 단계에 필요한 정확한 명령만 남겨라.
 
 원칙 5. 검증 없이 성공을 주장하지 마라.
+
+원칙 6. 사용자가 같은 live 세션에서 터미널과 Telegram을 자유롭게 오가길 원하면 `hook-local`이 아니라 `local-managed` 경로를 안내하라.
+- `hook-local`은 deprecated다.
+- 자유 전환 경로는 `tl open`이다.
+- 필요하면 하위 명령으로 `tl local start` + `tl local open`을 사용할 수 있다.
 
 아래 순서대로 수행하라.
 
@@ -75,12 +79,9 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - 기존 다른 설정은 유지한다.
 
 4. hook 전략 결정
-- `~/.codex/hooks.json`이 없으면 `tl init`
-- `~/.codex/hooks.json`이 있으면:
-  - TL hook가 이미 있는지 확인
-  - TL hook가 없으면 `tl init`
-  - custom router/wrapper가 있는 복잡한 환경이면 direct TL hook를 무조건 추가하지 말고, 최종 graph에서 TL이 이벤트당 정확히 1회만 존재하는지 먼저 검증한다
-- `tl init --force`는 overwrite이므로 명시적 필요가 있을 때만 사용한다
+- `tl init`으로 deprecated TL direct hook가 남아 있으면 제거한다
+- `cmux` router나 custom wrapper가 있으면 유지한다
+- direct TL `SessionStart` / `Stop` hook는 다시 추가하지 않는다
 
 5. TL 설정
 - `TL_BOT_TOKEN`과 `TL_GROUP_ID`가 둘 다 있으면 `tl setup --non-interactive`
@@ -102,8 +103,8 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - `cat ~/.tl/config.json`
 - Telegram 검증:
   - `/tl-status` 응답 여부
-  - 새 root Codex 세션 시작 후 topic 생성 여부
-  - Stop 메시지 reply 후 resume 여부
+  - `tl open`으로 세션 시작 후 topic 생성 여부
+  - Telegram과 터미널 양쪽에서 같은 세션에 접근되는지
 
 8. 사용자에게 꼭 알려야 할 점
 - TL은 Topics-enabled Telegram group/supergroup 기준이다
@@ -115,6 +116,11 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계에서만 전송된다
 - `🛠️ resumed, working...`와 heartbeat는 `UserPromptSubmit -> tl hook-working`이 있을 때만 동작한다
 - `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late reply resume fallback이 시도된다
+- 자유 전환이 필요하면:
+  - `tl config set localCodexEndpoint=ws://127.0.0.1:8795`
+  - `tl stop && tl start`
+  - `tl open --cwd "$PWD" --project my-session`
+- `hook-local`은 deprecated 상태이며 기본 경로가 아니다
 
 9. 최종 보고
 - 실제로 실행한 명령

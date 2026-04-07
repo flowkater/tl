@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "tl hook-session-start",
+            "command": "~/.codex/hooks/tl-hook.sh hook-session-start",
             "statusMessage": "Connecting to Telegram..."
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "tl hook-stop-and-wait",
+            "command": "~/.codex/hooks/tl-hook.sh hook-stop-and-wait",
             "timeout": 7200
           }
         ]

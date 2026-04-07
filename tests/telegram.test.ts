@@ -638,6 +638,52 @@ describe('TelegramBot.init', () => {
     expect(deliver).toHaveBeenCalledWith('s1', 'topic waiting message');
   });
 
+  it('routes a topic message without reply to the late reply handler for active sessions', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const lateReplyHandler = vi.fn().mockResolvedValue(true);
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'active',
+            stop_message_id: 77,
+            started_at: '2026-04-06T00:00:00.000Z',
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver: vi.fn().mockReturnValue(false),
+    } as any);
+
+    bot.setLateReplyHandler(lateReplyHandler);
+    (bot as any).bot = { api: { sendMessage, setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: 'topic active message',
+      },
+    });
+
+    expect(lateReplyHandler).toHaveBeenCalledWith('s1', 'topic active message');
+    expect(setMessageReaction).toHaveBeenCalledWith(
+      config.groupId,
+      88,
+      [{ type: 'emoji', emoji: '👍' }]
+    );
+    expect(sendMessage).not.toHaveBeenCalledWith(
+      config.groupId,
+      '⚠️ 지금은 reply 대기 상태가 아닙니다. 다음 작업 완료 메시지에 Reply해주세요',
+      expect.anything()
+    );
+  });
+
   it('routes a topic message without reply to the completed session late-reply handler', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
     const setMessageReaction = vi.fn().mockResolvedValue(undefined);

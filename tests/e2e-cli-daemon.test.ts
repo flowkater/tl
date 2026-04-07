@@ -167,4 +167,40 @@ describe.sequential('TL CLI + daemon E2E', () => {
     expect(result.stdout.trim()).toBe('');
     expect(result.stderr).toContain('Warning: Hook connection failed');
   });
+
+  it('starts a local managed session through the CLI and exposes local status', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      const start = await harness.runCli(
+        ['local', 'start', '--cwd', process.cwd(), '--project', 'local-managed-poc'],
+        ''
+      );
+
+      expect(start.code).toBe(0);
+      const payload = JSON.parse(start.stdout);
+      expect(payload).toMatchObject({
+        status: 'started',
+        mode: 'local-managed',
+        endpoint: 'ws://127.0.0.1:8795',
+      });
+
+      const session = harness.store.get(payload.session_id)?.record;
+      expect(session?.local_bridge_enabled).toBe(true);
+      expect(session?.local_bridge_state).toBe('attached');
+      expect(session?.local_attachment_id).toBe(payload.thread_id);
+      expect(session?.remote_endpoint).toBe('ws://127.0.0.1:8795');
+
+      const status = await harness.runCli(['local', 'status', payload.session_id], '');
+      expect(status.code).toBe(0);
+      expect(JSON.parse(status.stdout)).toMatchObject({
+        session_id: payload.session_id,
+        mode: 'local-managed',
+        endpoint: 'ws://127.0.0.1:8795',
+        local_bridge_enabled: true,
+        local_bridge_state: 'attached',
+      });
+    } finally {
+      await harness.close();
+    }
+  });
 });

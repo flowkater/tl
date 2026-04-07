@@ -19,6 +19,7 @@ import { attachRemoteSession, clearRemoteSession, hasRemoteSessionAttachment } f
 import { RemoteWorkerRuntimeManager } from './remote-worker-runtime.js';
 
 const startTime = Date.now();
+const DEFAULT_LOCAL_CODEX_ENDPOINT = 'ws://127.0.0.1:8795';
 
 type DaemonAppDeps = {
   store: SessionsStore;
@@ -28,6 +29,7 @@ type DaemonAppDeps = {
   appServerClient?: AppServerClient;
   appServerRuntime?: AppServerRuntimeManager;
   remoteWorkerRuntime?: RemoteWorkerRuntimeManager;
+  config?: Partial<ReturnType<typeof loadConfig>>;
 };
 
 function getPidPath(): string {
@@ -85,8 +87,22 @@ export function createDaemonApp({
   appServerClient,
   appServerRuntime,
   remoteWorkerRuntime,
+  config,
 }: DaemonAppDeps): Hono {
   const app = new Hono();
+
+  const resolveLocalEndpoint = (override?: string): string => {
+    if (override && override.trim().length > 0) {
+      return override;
+    }
+    if (config?.localCodexEndpoint && config.localCodexEndpoint.trim().length > 0) {
+      return config.localCodexEndpoint;
+    }
+    if (config?.remoteCodexEndpoint && config.remoteCodexEndpoint.trim().length > 0) {
+      return config.remoteCodexEndpoint;
+    }
+    return DEFAULT_LOCAL_CODEX_ENDPOINT;
+  };
 
   // ===== POST /hook/session-start =====
   app.post('/hook/session-start', async (c) => {
@@ -368,6 +384,83 @@ export function createDaemonApp({
     }
   });
 
+  app.post('/local/start', async (c) => {
+    if (!appServerClient || !appServerRuntime || !remoteWorkerRuntime || !remoteStopController) {
+      return c.json({ error: 'Local managed runtime unavailable' }, 503);
+    }
+
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.cwd) {
+      return c.json({ error: 'Missing cwd' }, 400);
+    }
+
+    const cwd = body.cwd;
+    const model = body.model ?? 'gpt-5.4';
+    const initialText = typeof body.initial_text === 'string' ? body.initial_text : '';
+    const project = typeof body.project === 'string' && body.project.trim().length > 0
+      ? body.project.trim()
+      : path.basename(cwd);
+    const endpoint = resolveLocalEndpoint(body.endpoint);
+
+    try {
+      await appServerRuntime.ensureAvailable(endpoint, cwd);
+      const thread = await appServerClient.createThread({
+        endpoint,
+        cwd,
+      });
+
+      await sessionManager.handleSessionStart({
+        session_id: thread.threadId,
+        model,
+        turn_id: '',
+        project,
+        cwd,
+        last_user_message: initialText,
+        remote_endpoint: endpoint,
+        remote_thread_id: thread.threadId,
+      });
+
+      store.update(thread.threadId, (record) => {
+        record.local_bridge_enabled = true;
+        record.local_bridge_state = 'attached';
+        record.local_input_queue_depth = 0;
+        record.local_last_input_source = null;
+        record.local_last_input_at = null;
+        record.local_last_injection_error = null;
+        record.local_attachment_id = thread.threadId;
+      });
+      await store.save();
+
+      await remoteStopController.ensureWorkerAttached(
+        thread.threadId,
+        endpoint,
+        cwd
+      );
+
+      if (initialText.length > 0) {
+        await remoteStopController.handleReply(thread.threadId, initialText);
+      }
+
+      const created = store.get(thread.threadId);
+      return c.json({
+        status: 'started',
+        session_id: thread.threadId,
+        topic_id: created?.record.topic_id ?? null,
+        mode: 'local-managed',
+        endpoint,
+        thread_id: thread.threadId,
+      });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
+  });
+
   // ===== POST /remote/detach =====
   app.post('/remote/detach', async (c) => {
     let body: any;
@@ -479,6 +572,50 @@ export function createDaemonApp({
         worker_pid: record.remote_worker_pid,
         worker_log_path: record.remote_worker_log_path,
         worker_last_error: record.remote_worker_last_error,
+      }));
+
+    return c.json({ sessions });
+  });
+
+  app.get('/local/status', async (c) => {
+    const sessionId = c.req.query('session_id');
+
+    if (sessionId) {
+      const existing = store.get(sessionId);
+      if (!existing) {
+        return c.json({ error: 'Session not found' }, 404);
+      }
+
+      return c.json({
+        session_id: sessionId,
+        mode: 'local-managed',
+        endpoint: existing.record.remote_endpoint,
+        thread_id: existing.record.remote_thread_id,
+        topic_id: existing.record.topic_id,
+        cwd: existing.record.cwd,
+        local_bridge_enabled: existing.record.local_bridge_enabled ?? false,
+        local_bridge_state: existing.record.local_bridge_state ?? null,
+        local_attachment_id: existing.record.local_attachment_id ?? null,
+        remote_status: existing.record.remote_status,
+        attached: hasRemoteSessionAttachment(existing.record),
+      });
+    }
+
+    const sessions = store
+      .listAll()
+      .filter(({ record }) => record.local_bridge_enabled === true)
+      .map(({ id, record }) => ({
+        session_id: id,
+        mode: 'local-managed',
+        endpoint: record.remote_endpoint,
+        thread_id: record.remote_thread_id,
+        topic_id: record.topic_id,
+        cwd: record.cwd,
+        local_bridge_enabled: record.local_bridge_enabled ?? false,
+        local_bridge_state: record.local_bridge_state ?? null,
+        local_attachment_id: record.local_attachment_id ?? null,
+        remote_status: record.remote_status,
+        attached: hasRemoteSessionAttachment(record),
       }));
 
     return c.json({ sessions });
@@ -722,6 +859,7 @@ async function main() {
     appServerClient,
     appServerRuntime,
     remoteWorkerRuntime,
+    config,
   });
 
   // HTTP 서버 시작

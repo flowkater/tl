@@ -13,6 +13,7 @@ const DEFAULT_CONFIG: DaemonConfig = {
   stopTimeout: 7200,
   liveStream: false,
   emojiReaction: '👍',
+  localCodexEndpoint: 'ws://127.0.0.1:8795',
   remoteCodexEndpoint: null,
 };
 
@@ -73,6 +74,16 @@ export function loadConfig(): DaemonConfig {
   }
   if (typeof config.emojiReaction !== 'string' || config.emojiReaction.trim() === '') {
     throw new TlError('emojiReaction must be a non-empty string', 'CONFIG_INVALID');
+  }
+  if (
+    config.localCodexEndpoint !== null &&
+    config.localCodexEndpoint !== undefined &&
+    (typeof config.localCodexEndpoint !== 'string' || config.localCodexEndpoint.trim() === '')
+  ) {
+    throw new TlError(
+      'localCodexEndpoint must be null or a non-empty string',
+      'CONFIG_INVALID'
+    );
   }
   if (
     config.remoteCodexEndpoint !== null &&

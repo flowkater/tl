@@ -109,6 +109,42 @@ describe('AppServerClient', () => {
     ]);
   });
 
+  it('exposes injectLocalInput as the same text injection path for local bridge callers', async () => {
+    const connection = new FakeConnection();
+    const factory: AppServerConnectionFactory = async () => connection;
+    const client = new AppServerClient(factory);
+
+    const result = await client.injectLocalInput({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      text: 'reply from local bridge',
+    });
+
+    expect(result).toEqual({
+      mode: 'start',
+      turnId: 'turn-started',
+    });
+    expect(connection.calls).toEqual([
+      {
+        method: 'thread/read',
+        params: { threadId: 'thread-1', includeTurns: true },
+      },
+      {
+        method: 'turn/start',
+        params: {
+          threadId: 'thread-1',
+          input: [
+            {
+              type: 'text',
+              text: 'reply from local bridge',
+              text_elements: [],
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('sends turn/steer when the latest thread turn is still active', async () => {
     const connection = new FakeConnection();
     connection.request = async (method: string, params: unknown) => {

@@ -27,6 +27,11 @@ export type RemoteInjectResult = {
   turnId: string;
 };
 
+export type LocalInjectResult = {
+  mode: 'start' | 'steer';
+  turnId: string;
+};
+
 export type RemoteResumeResult = {
   threadId: string;
 };
@@ -273,6 +278,18 @@ export class AppServerClient {
     } finally {
       await connection.close();
     }
+  }
+
+  async injectLocalInput(args: {
+    endpoint: string;
+    threadId: string;
+    text: string;
+  }): Promise<LocalInjectResult> {
+    return this.injectReply({
+      endpoint: args.endpoint,
+      threadId: args.threadId,
+      replyText: args.text,
+    });
   }
 
   async waitForTurnToSettle(args: {

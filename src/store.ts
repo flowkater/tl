@@ -4,6 +4,7 @@ import os from 'os';
 import { SessionRecord, SessionsFile, SessionStatus } from './types.js';
 import { TlError } from './errors.js';
 import { logger } from './logger.js';
+import { ensureLocalSessionDefaults } from './local-session-bridge.js';
 import { ensureRemoteSessionDefaults } from './remote-mode.js';
 
 function getDataDir(): string {
@@ -78,6 +79,7 @@ export class SessionsStore {
       this.data.version = 1;
     }
     for (const record of Object.values(this.data.sessions)) {
+      ensureLocalSessionDefaults(record);
       ensureRemoteSessionDefaults(record);
     }
   }
