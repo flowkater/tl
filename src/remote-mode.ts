@@ -1,4 +1,4 @@
-import type { RemoteSessionStatus, SessionRecord } from './types.js';
+import type { RemoteSessionStatus, SessionMode, SessionRecord } from './types.js';
 
 export type RemoteAttachmentArgs = {
   endpoint: string;
@@ -29,6 +29,14 @@ export function ensureRemoteSessionDefaults(record: SessionRecord): void {
   record.remote_worker_last_error ??= null;
 }
 
+export function isLocalManagedSession(record: SessionRecord): boolean {
+  return record.mode === 'local-managed' || record.local_bridge_enabled === true;
+}
+
+export function resolveManagedMode(record: SessionRecord): SessionMode {
+  return isLocalManagedSession(record) ? 'local-managed' : 'remote-managed';
+}
+
 export function hasRemoteSessionAttachment(record: SessionRecord): boolean {
   return (
     (record.mode === 'remote-managed' || record.remote_mode_enabled === true) &&
@@ -44,9 +52,9 @@ export function attachRemoteSession(
   args: RemoteAttachmentArgs
 ): void {
   ensureRemoteSessionDefaults(record);
-  record.mode = 'remote-managed';
+  record.mode = resolveManagedMode(record);
   record.remote_mode_enabled = true;
-  record.remote_input_owner = 'telegram';
+  record.remote_input_owner = isLocalManagedSession(record) ? 'tui' : 'telegram';
   record.remote_status = 'attached';
   record.remote_endpoint = args.endpoint;
   record.remote_thread_id = args.threadId;

@@ -97,6 +97,19 @@ describe('TelegramBot.init', () => {
     );
   });
 
+  it('deletes a forum topic through the Telegram API', async () => {
+    const deleteForumTopic = vi.fn().mockResolvedValue(true);
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+
+    (bot as any).bot = { api: { deleteForumTopic } };
+
+    await bot.deleteTopic(42);
+
+    expect(deleteForumTopic).toHaveBeenCalledWith(config.groupId, 42);
+  });
+
   it('renders local stop footer when local mode metadata is provided', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 123 });
     const bot = new TelegramBot(config, { listActive: () => [] } as any, {
@@ -318,6 +331,23 @@ describe('TelegramBot.init', () => {
       2,
       config.groupId,
       '⏳ still working...',
+      { message_thread_id: 42 }
+    );
+  });
+
+  it('sends typing actions to the same topic thread', async () => {
+    const sendChatAction = vi.fn().mockResolvedValue(true);
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+
+    (bot as any).bot = { api: { sendChatAction } };
+
+    await bot.sendTypingAction(config.groupId, 42);
+
+    expect(sendChatAction).toHaveBeenCalledWith(
+      config.groupId,
+      'typing',
       { message_thread_id: 42 }
     );
   });

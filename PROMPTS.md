@@ -50,6 +50,8 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 
 원칙 3. 기본 시작 경로는 `tl open`이다.
 - `tl open`은 daemon-owned `local-managed` 세션을 만들고 곧바로 Codex에 attach한다.
+- `tl open`은 현재 터미널에서 foreground Codex를 직접 실행하므로 `cmux`와 일반 터미널 동작을 유지한다.
+- `--text`가 없으면 blank 세션을 먼저 열고, 첫 실제 프롬프트가 들어오면 TL이 그 thread를 채택한다.
 - 자유 전환은 이 경로를 기준으로 설명하라.
 
 원칙 4. `TL_BOT_TOKEN`과 `TL_GROUP_ID`가 없으면 설치까지만 하고 멈춰라.
@@ -117,9 +119,9 @@ TL_BOT_TOKEN="123456:ABC..." TL_GROUP_ID="-1001234567890" \
 - `🛠️ resumed, working...`와 heartbeat는 `UserPromptSubmit -> tl hook-working`이 있을 때만 동작한다
 - `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late reply resume fallback이 시도된다
 - 자유 전환이 필요하면:
-  - `tl config set localCodexEndpoint=ws://127.0.0.1:8795`
-  - `tl stop && tl start`
-  - `tl open --cwd "$PWD" --project my-session`
+- `tl config set localCodexEndpoint=ws://127.0.0.1:8796`
+- `tl stop && tl start`
+- `tl open --cwd "$PWD" --project my-session`
 - `hook-local`은 deprecated 상태이며 기본 경로가 아니다
 
 9. 최종 보고

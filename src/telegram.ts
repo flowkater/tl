@@ -103,6 +103,15 @@ export class TelegramBot {
     return forumTopic.message_thread_id;
   }
 
+  async deleteTopic(topicId: number): Promise<void> {
+    if (!this.bot) throw new Error('Bot not initialized');
+    await this.bot.api.deleteForumTopic(this.config.groupId, topicId);
+
+    logger.info('Forum topic deleted', {
+      topic_id: topicId,
+    });
+  }
+
   // ===== 메시지 전송 =====
 
   async sendStartMessage(
@@ -213,6 +222,19 @@ export class TelegramBot {
     return msg.message_id;
   }
 
+  async sendTopicText(
+    chatId: number,
+    topicId: number,
+    text: string
+  ): Promise<number> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    const msg = await this.sendMessageWithRetry(chatId, text, {
+      message_thread_id: topicId,
+    });
+    return msg.message_id;
+  }
+
   async sendRemoteDeliveredMessage(
     chatId: number,
     topicId: number
@@ -294,6 +316,17 @@ export class TelegramBot {
       }
     );
     return msg.message_id;
+  }
+
+  async sendTypingAction(
+    chatId: number,
+    topicId: number
+  ): Promise<void> {
+    if (!this.bot) throw new Error('Bot not initialized');
+
+    await this.bot.api.sendChatAction(chatId, 'typing', {
+      message_thread_id: topicId,
+    });
   }
 
   async sendReplyFallbackMessage(
@@ -770,6 +803,14 @@ export class TelegramBot {
 
     if (mode === 'local') {
       return '<i>mode: local-hook</i>';
+    }
+
+    if (mode === 'local-managed') {
+      const ownerSuffix = remoteOwner ? ` · owner: ${this.escapeHtml(remoteOwner)}` : '';
+      if (remoteStatus) {
+        return `<i>mode: local-managed${ownerSuffix} · state: ${this.escapeHtml(remoteStatus)}</i>`;
+      }
+      return `<i>mode: local-managed${ownerSuffix}</i>`;
     }
 
     const ownerSuffix = remoteOwner ? ` · owner: ${this.escapeHtml(remoteOwner)}` : '';

@@ -1,9 +1,13 @@
 import { AppServerClient, type RemoteInjectResult } from './app-server-client.js';
 import { AppServerRuntimeManager } from './app-server-runtime.js';
-import { hasRemoteSessionAttachment } from './remote-mode.js';
+import {
+  hasRemoteSessionAttachment,
+  resolveManagedMode,
+} from './remote-mode.js';
 import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
 import { RemoteWorkerRuntimeManager } from './remote-worker-runtime.js';
+import { LocalConsoleRuntimeManager } from './local-console-runtime.js';
 
 type LateReplyFallback = {
   handle(sessionId: string, replyText: string): Promise<boolean>;
@@ -53,6 +57,7 @@ export class RemoteStopController {
     private fallback: LateReplyFallback,
     private runtime: AppServerRuntimeManager,
     private workerRuntime: RemoteWorkerRuntimeManager,
+    private localConsoleRuntime?: LocalConsoleRuntimeManager,
     options: RemoteStopControllerOptions = {}
     ) {
     this.notifyDelivered = options.notifyDelivered;
@@ -71,16 +76,26 @@ export class RemoteStopController {
     }
 
     try {
-      await this.ensureWorkerAttached(
-        sessionId,
-        existing.record.remote_endpoint!,
-        existing.record.cwd,
-        existing.record.remote_worker_pid,
-        existing.record.remote_worker_log_path
-      );
+      if (existing.record.local_bridge_enabled === true && this.localConsoleRuntime) {
+        await this.ensureLocalConsoleAttached(
+          sessionId,
+          existing.record.remote_endpoint!,
+          existing.record.cwd,
+          existing.record.local_attachment_id,
+          existing.record.remote_worker_log_path
+        );
+      } else {
+        await this.ensureWorkerAttached(
+          sessionId,
+          existing.record.remote_endpoint!,
+          existing.record.cwd,
+          existing.record.remote_worker_pid,
+          existing.record.remote_worker_log_path
+        );
+      }
 
       this.store.update(sessionId, (record) => {
-        record.mode = 'remote-managed';
+        record.mode = resolveManagedMode(record);
         record.remote_input_owner = 'telegram';
         record.remote_status = 'injecting';
         record.remote_last_error = null;
@@ -109,7 +124,7 @@ export class RemoteStopController {
     } catch (err) {
       const message = (err as Error).message;
       this.store.update(sessionId, (record) => {
-        record.mode = 'remote-managed';
+        record.mode = resolveManagedMode(record);
         record.remote_input_owner = 'telegram';
         record.remote_status = 'recovering';
         record.remote_last_injection_error = message;
@@ -154,7 +169,7 @@ export class RemoteStopController {
           record.remote_last_resume_error ??
           record.remote_last_injection_error ??
           message;
-        record.mode = 'remote-managed';
+        record.mode = resolveManagedMode(record);
         record.remote_input_owner = 'telegram';
         record.remote_status = 'degraded';
         record.remote_last_error = currentError;
@@ -196,11 +211,43 @@ export class RemoteStopController {
 
     this.store.update(sessionId, (record) => {
       record.remote_mode_enabled = true;
-      record.mode = 'remote-managed';
+      record.mode = resolveManagedMode(record);
       record.remote_input_owner = 'telegram';
       record.remote_worker_pid = worker.pid;
       record.remote_worker_log_path = worker.logPath;
       record.remote_worker_started_at = new Date().toISOString();
+      record.remote_worker_last_error = null;
+    });
+    await this.store.save();
+  }
+
+  async ensureLocalConsoleAttached(
+    sessionId: string,
+    endpoint: string,
+    cwd: string,
+    knownAttachmentId?: string | null,
+    knownLogPath?: string | null
+  ): Promise<void> {
+    if (!this.localConsoleRuntime) {
+      throw new Error('Local console runtime unavailable');
+    }
+
+    const consoleSession = await this.localConsoleRuntime.ensureAttached({
+      sessionId,
+      endpoint,
+      cwd,
+      knownAttachmentId,
+      knownLogPath,
+    });
+
+    this.store.update(sessionId, (record) => {
+      record.remote_mode_enabled = true;
+      record.mode = resolveManagedMode(record);
+      record.remote_input_owner = 'telegram';
+      record.local_bridge_enabled = true;
+      record.local_bridge_state = 'attached';
+      record.local_attachment_id = consoleSession.attachmentId;
+      record.remote_worker_log_path = consoleSession.logPath;
       record.remote_worker_last_error = null;
     });
     await this.store.save();
@@ -246,7 +293,7 @@ export class RemoteStopController {
     } catch (err) {
       const message = (err as Error).message;
       this.store.update(sessionId, (record) => {
-        record.mode = 'remote-managed';
+        record.mode = resolveManagedMode(record);
         record.remote_input_owner = 'telegram';
         record.remote_status = 'recovering';
       record.remote_last_injection_error = message;
@@ -372,7 +419,7 @@ export class RemoteStopController {
   ): Promise<void> {
     this.store.update(sessionId, (record) => {
       record.status = 'active';
-      record.mode = 'remote-managed';
+      record.mode = resolveManagedMode(record);
       record.remote_input_owner = 'telegram';
       record.last_user_message = replyText;
       record.remote_thread_id = threadId;
@@ -411,7 +458,7 @@ export class RemoteStopController {
         });
 
         const existing = this.store.get(sessionId);
-        if (!existing || existing.record.mode !== 'remote-managed') {
+        if (!existing || existing.record.remote_mode_enabled !== true) {
           return;
         }
         if (existing.record.remote_last_turn_id !== turnId) {
@@ -421,7 +468,7 @@ export class RemoteStopController {
         const nextTotalTurns = existing.record.total_turns + 1;
 
         this.store.update(sessionId, (record) => {
-          if (record.mode !== 'remote-managed') {
+          if (record.remote_mode_enabled !== true) {
             return;
           }
           if (record.remote_last_turn_id !== turnId) {
@@ -455,7 +502,7 @@ export class RemoteStopController {
           });
           if (stopMessageId != null) {
             this.store.update(sessionId, (record) => {
-              if (record.mode !== 'remote-managed') {
+              if (record.remote_mode_enabled !== true) {
                 return;
               }
               if (record.remote_last_turn_id !== turnId) {
@@ -474,7 +521,7 @@ export class RemoteStopController {
           error: (err as Error).message,
         });
         this.store.update(sessionId, (record) => {
-          if (record.mode !== 'remote-managed') {
+          if (record.remote_mode_enabled !== true) {
             return;
           }
           if (record.remote_last_turn_id !== turnId) {

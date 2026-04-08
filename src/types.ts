@@ -1,6 +1,6 @@
 // ===== 영속화 상태 (sessions.json에 저장) =====
 export type SessionStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
-export type SessionMode = 'local' | 'remote-managed';
+export type SessionMode = 'local' | 'local-managed' | 'remote-managed';
 export type RemoteInputOwner = 'telegram' | 'tui';
 export type LocalBridgeState = 'attached' | 'detached' | 'recovering';
 export type LocalInputSource = 'console' | 'telegram';
@@ -83,6 +83,8 @@ export interface SessionStartPayload {
   source: string;
   remote_endpoint?: string;
   remote_thread_id?: string;
+  session_mode?: SessionMode;
+  local_attachment_id?: string;
 }
 
 export interface StopPayload {
@@ -119,6 +121,8 @@ export interface SessionManager {
     cwd: string;
     last_user_message: string;
     is_reconnect?: boolean;
+    session_mode?: SessionMode;
+    local_attachment_id?: string | null;
     remote_endpoint?: string | null;
     remote_thread_id?: string | null;
   }): Promise<void>;
@@ -143,6 +147,16 @@ export interface SessionManager {
 
   handleWorking(args: {
     session_id: string;
+    prompt?: string;
+  }): Promise<void>;
+
+  handleManagedTurnSettled(args: {
+    session_id: string;
+    turn_id: string;
+    last_message: string;
+    total_turns: number;
+    last_user_message?: string | null;
+    remote_input_owner?: RemoteInputOwner | null;
   }): Promise<void>;
 }
 

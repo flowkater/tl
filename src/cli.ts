@@ -4,18 +4,26 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 
 import readline from 'readline';
 import { serializeStopHookOutput } from './stop-hook-output.js';
+import {
+  launchInteractiveCodex,
+  launchInteractiveCodexOpen,
+} from './interactive-codex-launcher.js';
+import { AppServerClient } from './app-server-client.js';
+import { allocateAvailableLocalEndpoint } from './local-app-server-endpoint.js';
 import {
   disableRemoteSessionStartHook,
   enableRemoteSessionStartHook,
   removeTlHooks,
   TL_REMOTE_SESSION_START_WRAPPER_PATH,
   writeRemoteSessionStartWrapper,
+  writeHookRunnerScript,
 } from './codex-hooks.js';
-import { loadConfig, saveConfig } from './config.js';
+import { DEFAULT_LOCAL_CODEX_ENDPOINT, loadConfig, saveConfig } from './config.js';
 import {
   isReconnectSessionStart,
   isSubagentSessionStart,
@@ -27,6 +35,7 @@ import {
   UserPromptSubmitPayload,
 } from './types.js';
 import { PluginInstaller } from './plugin-installer.js';
+import { AppServerRuntimeManager } from './app-server-runtime.js';
 
 function getConfigDir(): string {
   return process.env.TL_CONFIG_DIR || path.join(os.homedir(), '.tl');
@@ -92,6 +101,8 @@ async function main() {
       return cmdLocal(args);
     case 'open':
       return cmdOpen(args);
+    case 'topic':
+      return cmdTopic(args);
     case 'hook-session-start':
       return cmdHookSessionStart();
     case 'hook-stop-and-wait':
@@ -296,6 +307,23 @@ async function ask(rl: readline.Interface, prompt: string, defaultVal?: string):
     : `${prompt}: `;
   const answer = await new Promise<string>((resolve) => rl.question(display, resolve));
   return answer.trim() || defaultVal || '';
+}
+
+async function resolveBootstrapText(text: string, prompt: string): Promise<string> {
+  if (text.trim().length > 0) {
+    return text.trim();
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return '';
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await ask(rl, prompt);
+  } finally {
+    rl.close();
+  }
 }
 
 async function cmdSetup(args: string[]) {
@@ -596,29 +624,51 @@ async function ensureDaemonRunning() {
   await new Promise((resolve) => setTimeout(resolve, 1000));
 }
 
-async function openManagedSession(sessionId: string, endpoint: string, cwd?: string) {
-  const child = spawn(
-    'codex',
-    [
-      'resume',
-      '--remote',
-      endpoint,
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--no-alt-screen',
-      sessionId,
-    ],
-    {
-      cwd: cwd ?? process.cwd(),
-      stdio: 'inherit',
-    }
-  );
-
-  await new Promise<void>((_resolve, reject) => {
-    child.on('exit', (code) => {
-      process.exit(code ?? 0);
-    });
-    child.on('error', reject);
+async function openManagedSession(
+  sessionId: string,
+  endpoint: string,
+  cwd?: string,
+  env?: NodeJS.ProcessEnv
+) {
+  const exitCode = await launchInteractiveCodex({
+    sessionId,
+    endpoint,
+    cwd: cwd ?? process.cwd(),
+    env,
   });
+  process.exit(exitCode);
+}
+
+function buildManagedCodexEnv(args: {
+  endpoint: string;
+  sessionMode: 'local-managed' | 'remote-managed';
+  project: string;
+  localAttachmentId?: string | null;
+}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TL_MANAGED_OPEN: '1',
+    TL_REMOTE_ENDPOINT: args.endpoint,
+    TL_SESSION_MODE: args.sessionMode,
+    TL_OPEN_PROJECT: args.project,
+  };
+
+  if (args.localAttachmentId && args.localAttachmentId.trim().length > 0) {
+    env.TL_LOCAL_ATTACHMENT_ID = args.localAttachmentId;
+  } else {
+    delete env.TL_LOCAL_ATTACHMENT_ID;
+  }
+
+  return env;
+}
+
+function ensureManagedHookWrapper() {
+  writeHookRunnerScript(getCliScriptPath(), undefined, process.execPath);
+}
+
+function buildOpenAttachmentId(): string {
+  const suffix = crypto.randomUUID().slice(0, 12);
+  return `tl-open-${suffix}`;
 }
 
 async function cmdOpen(args: string[]) {
@@ -657,25 +707,54 @@ async function cmdOpen(args: string[]) {
   }
 
   await ensureDaemonRunning();
-
-  const res = await fetch(`http://localhost:${getHookPort()}/local/start`, {
+  ensureManagedHookWrapper();
+  const resolvedProject = project.trim().length > 0 ? project.trim() : path.basename(cwd);
+  const config = loadConfig();
+  const baseEndpoint =
+    endpoint ||
+    config.localCodexEndpoint ||
+    config.remoteCodexEndpoint ||
+    DEFAULT_LOCAL_CODEX_ENDPOINT;
+  const resolvedEndpoint = endpoint
+    ? baseEndpoint
+    : await allocateAvailableLocalEndpoint(baseEndpoint);
+  const appServerRuntime = new AppServerRuntimeManager();
+  await appServerRuntime.ensureAvailable(resolvedEndpoint, cwd);
+  const appServerClient = new AppServerClient();
+  const knownThreads = await appServerClient.listThreads({
+    endpoint: resolvedEndpoint,
+  });
+  const attachmentId = buildOpenAttachmentId();
+  const registerRes = await fetch(`http://localhost:${getHookPort()}/local/open/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      attachment_id: attachmentId,
+      log_path: null,
       cwd,
+      project: resolvedProject,
       model,
-      initial_text: text,
-      project: project.trim().length > 0 ? project : undefined,
-      endpoint: endpoint || undefined,
+      endpoint: resolvedEndpoint,
+      known_thread_ids: knownThreads.map((thread) => thread.id),
     }),
   });
-  const data = await res.json();
-  if (!res.ok) {
-    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+  const registerData = await registerRes.json();
+  if (!registerRes.ok) {
+    process.stderr.write(`HTTP ${registerRes.status}: ${JSON.stringify(registerData)}\n`);
     process.exit(1);
   }
-
-  await openManagedSession(data.session_id, data.endpoint, cwd);
+  const exitCode = await launchInteractiveCodexOpen({
+    endpoint: resolvedEndpoint,
+    cwd,
+    initialPrompt: text.trim().length > 0 ? text : undefined,
+    env: buildManagedCodexEnv({
+      endpoint: resolvedEndpoint,
+      sessionMode: 'local-managed',
+      project: resolvedProject,
+      localAttachmentId: attachmentId,
+    }),
+  });
+  process.exit(exitCode);
 }
 
 async function cmdRemoteEnable(args: string[]) {
@@ -891,28 +970,17 @@ async function cmdRemoteOpen(args: string[]) {
     process.exit(1);
   }
 
-  const child = spawn(
-    'codex',
-    [
-      'resume',
-      '--remote',
-      data.endpoint,
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--no-alt-screen',
-      sessionId,
-    ],
-    {
-      cwd: data.cwd ?? process.cwd(),
-      stdio: 'inherit',
-    }
+  ensureManagedHookWrapper();
+  await openManagedSession(
+    sessionId,
+    data.endpoint,
+    data.cwd ?? process.cwd(),
+    buildManagedCodexEnv({
+      endpoint: data.endpoint,
+      sessionMode: 'remote-managed',
+      project: path.basename(data.cwd ?? process.cwd()),
+    })
   );
-
-  await new Promise<void>((resolve, reject) => {
-    child.on('exit', (code) => {
-      process.exit(code ?? 0);
-    });
-    child.on('error', reject);
-  });
 }
 
 async function cmdRemoteStatus(args: string[]) {
@@ -1046,6 +1114,11 @@ async function cmdLocalStart(args: string[]) {
     process.exit(1);
   }
 
+  text = await resolveBootstrapText(
+    text,
+    'First message to bootstrap the local-managed session'
+  );
+
   const res = await fetch(`http://localhost:${getHookPort()}/local/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1086,8 +1159,18 @@ async function cmdLocalOpen(args: string[]) {
     process.stderr.write(`Session ${sessionId} is not local-managed\n`);
     process.exit(1);
   }
-
-  await openManagedSession(sessionId, data.endpoint, data.cwd);
+  ensureManagedHookWrapper();
+  await openManagedSession(
+    sessionId,
+    data.endpoint,
+    data.cwd,
+    buildManagedCodexEnv({
+      endpoint: data.endpoint,
+      sessionMode: 'local-managed',
+      project: path.basename(data.cwd ?? process.cwd()),
+      localAttachmentId: data.local_attachment_id ?? null,
+    })
+  );
 }
 
 async function cmdLocalStatus(args: string[]) {
@@ -1106,11 +1189,72 @@ async function cmdLocalStatus(args: string[]) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdTopic(args: string[]) {
+  const subcommand = args[0];
+
+  if (subcommand === 'delete') {
+    return cmdTopicDelete(args.slice(1));
+  }
+
+  console.log('Usage: tl topic delete --session <session_id> [--delete-session]');
+  console.log('       tl topic delete --topic <topic_id>');
+}
+
+async function cmdTopicDelete(args: string[]) {
+  let sessionId = '';
+  let topicId: number | null = null;
+  let deleteSession = false;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--session') {
+      sessionId = args[i + 1] ?? '';
+      i += 1;
+      continue;
+    }
+    if (arg === '--topic') {
+      const value = args[i + 1] ?? '';
+      topicId = value ? Number(value) : null;
+      i += 1;
+      continue;
+    }
+    if (arg === '--delete-session') {
+      deleteSession = true;
+    }
+  }
+
+  if (!sessionId && !topicId) {
+    process.stderr.write('Usage: tl topic delete --session <session_id> [--delete-session]\n');
+    process.stderr.write('       tl topic delete --topic <topic_id>\n');
+    process.exit(1);
+  }
+
+  const res = await fetch(`http://localhost:${getHookPort()}/admin/delete-topic`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId || undefined,
+      topic_id: topicId ?? undefined,
+      delete_session: deleteSession,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    process.stderr.write(`HTTP ${res.status}: ${JSON.stringify(data)}\n`);
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(data, null, 2));
+}
+
 // ===== tl hook-session-start =====
 async function cmdHookSessionStart() {
   const port = getHookPort();
   const remoteEndpoint = resolveRemoteEndpoint();
   const remoteThreadId = process.env.TL_REMOTE_THREAD_ID?.trim() || null;
+  const sessionMode = process.env.TL_SESSION_MODE?.trim() || null;
+  const localAttachmentId = process.env.TL_LOCAL_ATTACHMENT_ID?.trim() || null;
+  const projectOverride = process.env.TL_OPEN_PROJECT?.trim() || null;
 
   const stdin = fs.readFileSync(0, 'utf-8');
   if (!stdin.trim()) {
@@ -1129,7 +1273,10 @@ async function cmdHookSessionStart() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...payload,
+        project: projectOverride,
         is_reconnect: isReconnectSessionStart(payload),
+        session_mode: sessionMode,
+        local_attachment_id: localAttachmentId,
         remote_endpoint: remoteEndpoint,
         remote_thread_id: remoteThreadId,
       }),
@@ -1296,9 +1443,10 @@ Usage:
   tl remote detach <session_id>  Remove remote attachment from a TL session
   tl remote inject ...         Inject a reply into a remote-attached session
   tl remote status [session_id]  Show remote attachment status
-  tl local start ...           Start a daemon-owned local managed session
+  tl local start ...           Start a daemon-owned local managed session (requires bootstrap text)
   tl local open <session_id>   Open a console attached to a local managed session
   tl local status [session_id] Show local managed session status
+  tl topic delete ...          Delete a Telegram topic by session or topic id
   tl help                      Show this help
 
 Internal (used by Codex hooks):

@@ -41,6 +41,29 @@ export type RemoteTurnSettlement = {
   outputText: string;
 };
 
+export type ThreadSnapshotTurn = {
+  id: string;
+  status: string | null;
+  outputText: string;
+  userText: string | null;
+};
+
+export type ThreadSnapshot = {
+  unavailableBeforeFirstUserMessage: boolean;
+  turns: ThreadSnapshotTurn[];
+  latestTurn: ThreadSnapshotTurn | null;
+};
+
+export type AppServerThreadSummary = {
+  id: string;
+  cwd?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  status?: {
+    type?: string;
+  };
+};
+
 type ThreadReadResult = {
   thread?: {
     turns?: ThreadTurn[];
@@ -372,6 +395,111 @@ export class AppServerClient {
     }
   }
 
+  async listThreads(args: {
+    endpoint: string;
+  }): Promise<AppServerThreadSummary[]> {
+    const connection = await this.connectionFactory(args.endpoint);
+    try {
+      const response = await connection.request('thread/list', {});
+      if (!Array.isArray(response?.data)) {
+        return [];
+      }
+      return response.data as AppServerThreadSummary[];
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async listLoadedThreads(args: {
+    endpoint: string;
+  }): Promise<string[]> {
+    const connection = await this.connectionFactory(args.endpoint);
+    try {
+      const response = await connection.request('thread/loaded/list', {});
+      if (!Array.isArray(response?.data)) {
+        return [];
+      }
+      return response.data as string[];
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async waitForThreadLoaded(args: {
+    endpoint: string;
+    threadId: string;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<boolean> {
+    const deadline = Date.now() + (args.timeoutMs ?? 15_000);
+    const pollIntervalMs = args.pollIntervalMs ?? 500;
+
+    while (Date.now() < deadline) {
+      const loaded = await this.listLoadedThreads({ endpoint: args.endpoint });
+      if (loaded.includes(args.threadId)) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    return false;
+  }
+
+  async waitForNewThread(args: {
+    endpoint: string;
+    cwd: string;
+    excludeThreadIds?: string[];
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<AppServerThreadSummary | null> {
+    const deadline = Date.now() + (args.timeoutMs ?? 15_000);
+    const pollIntervalMs = args.pollIntervalMs ?? 1_000;
+    const excluded = new Set(args.excludeThreadIds ?? []);
+
+    while (Date.now() < deadline) {
+      const threads = await this.listThreads({ endpoint: args.endpoint });
+      const matched = threads
+        .filter((thread) => thread.cwd === args.cwd && !excluded.has(thread.id))
+        .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0];
+      if (matched) {
+        return matched;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    return null;
+  }
+
+  async readThreadSnapshot(args: {
+    endpoint: string;
+    threadId: string;
+  }): Promise<ThreadSnapshot> {
+    const connection = await this.connectionFactory(args.endpoint);
+    try {
+      const threadRead = await this.readThreadSafe(connection, args.threadId, {
+        tolerateUnavailableTurns: true,
+      });
+
+      const turns = Array.isArray(threadRead?.thread?.turns)
+        ? (threadRead.thread.turns as ThreadTurn[])
+        : [];
+      const normalizedTurns = turns.map((turn) => ({
+        id: turn.id,
+        status: turn.status ?? null,
+        outputText: extractAssistantText(turn.items),
+        userText: extractUserText(turn.items),
+      }));
+
+      return {
+        unavailableBeforeFirstUserMessage: threadRead.unavailableBeforeFirstUserMessage === true,
+        turns: normalizedTurns,
+        latestTurn: normalizedTurns.length > 0 ? normalizedTurns[normalizedTurns.length - 1] : null,
+      };
+    } finally {
+      await connection.close();
+    }
+  }
+
   private async readThreadSafe(
     connection: AppServerConnection,
     threadId: string,
@@ -452,6 +580,73 @@ function extractAssistantText(items: unknown[] | undefined): string {
   visit(items);
 
   return dedupePreservingOrder(texts).join('\n\n');
+}
+
+function extractUserText(items: unknown[] | undefined): string | null {
+  if (!Array.isArray(items) || items.length === 0) {
+    return null;
+  }
+
+  let found: string | null = null;
+
+  const visit = (value: unknown): void => {
+    if (found) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+        if (found) {
+          return;
+        }
+      }
+      return;
+    }
+
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    if (
+      record.role === 'user' &&
+      Array.isArray(record.content)
+    ) {
+      for (const content of record.content) {
+        if (!content || typeof content !== 'object') {
+          continue;
+        }
+        const contentRecord = content as Record<string, unknown>;
+        if (
+          typeof contentRecord.text === 'string' &&
+          contentRecord.text.trim().length > 0
+        ) {
+          found = contentRecord.text.trim();
+          return;
+        }
+      }
+    }
+
+    if (
+      typeof record.text === 'string' &&
+      record.text.trim().length > 0 &&
+      (record.type === 'input_text' || record.type === 'userMessage')
+    ) {
+      found = record.text.trim();
+      return;
+    }
+
+    for (const nested of Object.values(record)) {
+      visit(nested);
+      if (found) {
+        return;
+      }
+    }
+  };
+
+  visit(items);
+  return found;
 }
 
 function dedupePreservingOrder(values: string[]): string[] {

@@ -26,16 +26,22 @@ tl plugin status
 
 - TL 설치 완료
 - daemon 실행 중
-- Codex app-server endpoint 준비 (`localCodexEndpoint`, 기본 `ws://127.0.0.1:8795`)
+- Codex app-server endpoint 준비 (`localCodexEndpoint`, 기본 `ws://127.0.0.1:8796`)
 
 권장 흐름:
 
 ```bash
-tl config set localCodexEndpoint=ws://127.0.0.1:8795
+tl config set localCodexEndpoint=ws://127.0.0.1:8796
 tl stop
 tl start
 tl open --cwd "$PWD" --project my-session
 ```
+
+보충:
+
+- `tl open`은 현재 터미널에서 foreground Codex를 바로 실행한다.
+- `cmux` 환경과 일반 스크롤/alt-screen 동작은 그대로 유지된다.
+- `--text`가 없으면 blank Codex 세션이 먼저 열리고, 첫 실제 프롬프트가 들어오는 순간 TL이 해당 thread를 채택해 topic/session을 만든다.
 
 상태 확인:
 
@@ -289,7 +295,7 @@ tl status
 - `✅ reply delivered to Codex, resuming...`는 Stop hook 성공 경계에서만 전송된다.
 - `waiting`이 이미 끝난 뒤에도 같은 Stop 메시지에 reply가 오면 late reply resume fallback이 시도된다.
 - 터미널 ↔ Telegram 자유 전환이 목적이면 hook-local이 아니라 `local-managed`를 써야 한다.
-- `local-managed` 세션은 `tl local start`로 만들고 `tl local open`으로 다시 붙는다.
+- 기본 진입은 `tl open`이고, 재접속이 필요할 때만 `tl local open`을 쓴다.
 
 ## 10. Codex에게 맡기기
 

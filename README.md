@@ -28,7 +28,9 @@ TL is a local bridge that connects Codex sessions to Telegram topics so you can 
 Use this when you want the same Codex session to stay reachable from both the terminal and Telegram without getting stuck in `Stop -> waiting`.
 
 - TL starts a daemon-owned Codex thread through the app-server.
-- You enter the same live thread in your terminal with `tl open`.
+- You enter the same live thread in your current terminal with `tl open`.
+- `tl open` keeps the terminal environment intact, so `cmux` and normal scroll/alt-screen behavior stay under Codex control.
+- If you omit `--text`, `tl open` opens a blank Codex session first and TL adopts the thread when the first real prompt is submitted.
 - Telegram messages and terminal input land in the same live session.
 - `tl resume` becomes a recovery tool instead of the normal workflow.
 

@@ -4,6 +4,8 @@ import os from 'os';
 import { DaemonConfig } from './types.js';
 import { TlError } from './errors.js';
 
+export const DEFAULT_LOCAL_CODEX_ENDPOINT = 'ws://127.0.0.1:8796';
+
 const DEFAULT_CONFIG: DaemonConfig = {
   botToken: '',
   groupId: 0,
@@ -13,7 +15,7 @@ const DEFAULT_CONFIG: DaemonConfig = {
   stopTimeout: 7200,
   liveStream: false,
   emojiReaction: '👍',
-  localCodexEndpoint: 'ws://127.0.0.1:8795',
+  localCodexEndpoint: DEFAULT_LOCAL_CODEX_ENDPOINT,
   remoteCodexEndpoint: null,
 };
 

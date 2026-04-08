@@ -22,13 +22,16 @@ type CliResult = {
 
 type TelegramEvent =
   | { type: 'topic'; project: string; topicId: number }
+  | { type: 'topic-deleted'; topicId: number }
   | { type: 'start'; chatId: number; topicId: number; sessionId: string; model: string }
   | { type: 'stop'; chatId: number; topicId: number; body: string; totalTurns: number }
   | { type: 'resume-ack'; chatId: number; topicId: number }
+  | { type: 'topic-text'; chatId: number; topicId: number; text: string }
   | { type: 'working'; chatId: number; topicId: number }
   | { type: 'complete'; chatId: number; topicId: number; totalTurns: number; duration: string }
   | { type: 'reconnect'; chatId: number; topicId: number; sessionId: string }
   | { type: 'heartbeat'; chatId: number; topicId: number }
+  | { type: 'typing'; chatId: number; topicId: number }
   | { type: 'late-reply-started'; chatId: number; topicId: number }
   | { type: 'late-reply-failed'; chatId: number; topicId: number; error: string }
   | { type: 'bot-stop' };
@@ -46,6 +49,13 @@ class FakeTelegramTransport {
       topicId: this.nextTopicId,
     });
     return this.nextTopicId;
+  }
+
+  async deleteTopic(topicId: number): Promise<void> {
+    this.events.push({
+      type: 'topic-deleted',
+      topicId,
+    });
   }
 
   async sendStartMessage(
@@ -79,6 +89,11 @@ class FakeTelegramTransport {
     return this.nextMessageId++;
   }
 
+  async sendTopicText(chatId: number, topicId: number, text: string): Promise<number> {
+    this.events.push({ type: 'topic-text', chatId, topicId, text });
+    return this.nextMessageId++;
+  }
+
   async sendCompleteMessage(
     chatId: number,
     topicId: number,
@@ -95,6 +110,10 @@ class FakeTelegramTransport {
   async sendHeartbeatMessage(chatId: number, topicId: number): Promise<number> {
     this.events.push({ type: 'heartbeat', chatId, topicId });
     return this.nextMessageId++;
+  }
+
+  async sendTypingAction(chatId: number, topicId: number): Promise<void> {
+    this.events.push({ type: 'typing', chatId, topicId });
   }
 
   async sendLateReplyResumeStartedMessage(chatId: number, topicId: number): Promise<number> {
@@ -310,17 +329,31 @@ export class TlE2EHarness {
       store,
       replyQueue,
       sessionManager,
+      tg: telegram as any,
       appServerClient: {
         createThread: async () => {
           localThreadCounter += 1;
           return { threadId: `thread-local-${localThreadCounter}` };
         },
+        injectLocalInput: async () => ({
+          mode: 'start',
+          turnId: 'turn-local-1',
+        }),
+        waitForThreadLoaded: async () => true,
       } as any,
       appServerRuntime: {
         ensureAvailable: async () => true,
       } as any,
       remoteStopController: {
         ensureWorkerAttached: async () => undefined,
+        ensureLocalConsoleAttached: async (sessionId: string) => {
+          store.update(sessionId, (record) => {
+            record.local_attachment_id = `tl-local-${sessionId}`;
+            record.local_bridge_state = 'attached';
+            record.remote_worker_log_path = `/tmp/${sessionId}.log`;
+          });
+          await store.save();
+        },
         handleReply: async (_sessionId: string, _replyText: string) => ({
           handled: true,
           mode: 'remote',
@@ -328,6 +361,19 @@ export class TlE2EHarness {
         }),
       } as any,
       remoteWorkerRuntime: {} as any,
+      localConsoleRuntime: {
+        ensureAttached: async ({
+          sessionId,
+          knownAttachmentId,
+        }: {
+          sessionId: string;
+          knownAttachmentId?: string | null;
+        }) => ({
+          started: true,
+          attachmentId: knownAttachmentId ?? `tl-local-${sessionId}`,
+          logPath: `/tmp/${sessionId}.log`,
+        }),
+      } as any,
       config,
     });
     const { port, server } = await startServerWithRetries(app.fetch);

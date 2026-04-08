@@ -112,7 +112,7 @@ describe('RemoteStopController', () => {
 
   it('injects into app-server instead of launching late-reply resume for remote sessions', async () => {
     store._sessions.s1.remote_last_resume_error = 'stale resume error';
-    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
       notifyDelivered,
       notifyFailed,
       notifyRecovering,
@@ -150,7 +150,7 @@ describe('RemoteStopController', () => {
     client.injectReply.mockRejectedValueOnce(new Error('socket closed'));
     runtime.ensureAvailable.mockRejectedValueOnce(new Error('restart failed'));
     client.resumeThread.mockRejectedValueOnce(new Error('resume failed'));
-    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
       notifyDelivered,
       notifyFailed,
       notifyRecovering,
@@ -183,7 +183,7 @@ describe('RemoteStopController', () => {
         turnId: 'turn-3',
       });
 
-    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
       notifyDelivered,
       notifyFailed,
       notifyRecovering,
@@ -220,7 +220,7 @@ describe('RemoteStopController', () => {
         turnId: 'turn-9',
       });
 
-    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
       notifyDelivered,
       notifyFailed,
       notifyRecovering,
@@ -261,7 +261,7 @@ describe('RemoteStopController', () => {
       }),
       resolve,
     };
-    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, {
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
       notifyDelivered,
       notifyFailed,
       notifyRecovering,

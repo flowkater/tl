@@ -75,7 +75,7 @@ describe('daemon entrypoint', () => {
     const response = await app.request('http://localhost/hook/working', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: 's1' }),
+      body: JSON.stringify({ session_id: 's1', prompt: 'continue' }),
     });
 
     expect(response.status).toBe(202);
@@ -85,6 +85,7 @@ describe('daemon entrypoint', () => {
     });
     expect(sessionManager.handleWorking).toHaveBeenCalledWith({
       session_id: 's1',
+      prompt: 'continue',
     });
     expect(store.save).not.toHaveBeenCalled();
 
@@ -370,7 +371,7 @@ describe('daemon entrypoint', () => {
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(await response.json()).toMatchObject({
       status: 'started',
       session_id: 'thread-1',
       topic_id: 77,
@@ -378,6 +379,8 @@ describe('daemon entrypoint', () => {
       remote_input_owner: 'telegram',
       remote_status: 'attached',
       turn_id: 'turn-1',
+      total_turns: 0,
+      pristine: true,
     });
     expect(appServerRuntime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:9901', '/tmp/poc');
     expect(appServerClient.createThread).toHaveBeenCalled();
@@ -432,7 +435,7 @@ describe('daemon entrypoint', () => {
       local_last_input_source: null,
       local_last_input_at: null,
       local_last_injection_error: null,
-      local_attachment_id: 'thread-local-1',
+      local_attachment_id: 'tl-local-thread-local-1',
       remote_mode_enabled: true,
       remote_input_owner: 'telegram',
       remote_status: 'attached',
@@ -464,10 +467,24 @@ describe('daemon entrypoint', () => {
     };
     const appServerClient = {
       createThread: vi.fn().mockResolvedValue({ threadId: 'thread-local-1' }),
+      injectLocalInput: vi.fn().mockResolvedValue({ mode: 'start', turnId: 'turn-local-1' }),
+      waitForThreadLoaded: vi.fn().mockResolvedValue(true),
     };
     const remoteStopController = {
       ensureWorkerAttached: vi.fn().mockResolvedValue(undefined),
+      ensureLocalConsoleAttached: vi.fn().mockImplementation(async () => {
+        session.local_attachment_id = 'tl-local-thread-local-1';
+        session.local_bridge_state = 'attached';
+        session.remote_worker_log_path = '/tmp/thread-local-1.log';
+      }),
       handleReply: vi.fn().mockResolvedValue(null),
+    };
+    const localConsoleRuntime = {
+      ensureAttached: vi.fn().mockResolvedValue({
+        started: true,
+        attachmentId: 'tl-local-thread-local-1',
+        logPath: '/tmp/thread-local-1.log',
+      }),
     };
 
     const app = createDaemonApp({
@@ -478,6 +495,88 @@ describe('daemon entrypoint', () => {
       appServerClient: appServerClient as any,
       appServerRuntime: appServerRuntime as any,
       remoteWorkerRuntime: {} as any,
+      localConsoleRuntime: localConsoleRuntime as any,
+      config: {
+        localCodexEndpoint: 'ws://127.0.0.1:8795',
+      } as any,
+    });
+
+    const response = await app.request('http://localhost/local/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/poc',
+        model: 'gpt-5.4',
+        initial_text: 'bootstrap local session',
+        project: 'poc',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: 'started',
+      session_id: 'thread-local-1',
+      topic_id: 91,
+      mode: 'local-managed',
+      endpoint: 'ws://127.0.0.1:8795',
+      thread_id: 'thread-local-1',
+      attachment_id: 'tl-local-thread-local-1',
+      turn_id: 'turn-local-1',
+      total_turns: 0,
+      pristine: true,
+    });
+    expect(appServerRuntime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:8795', '/tmp/poc');
+    expect(appServerClient.createThread).toHaveBeenCalledWith({
+      endpoint: 'ws://127.0.0.1:8795',
+      cwd: '/tmp/poc',
+    });
+    expect(appServerClient.injectLocalInput).toHaveBeenCalledWith({
+      endpoint: 'ws://127.0.0.1:8795',
+      threadId: 'thread-local-1',
+      text: 'bootstrap local session',
+    });
+    expect(appServerClient.waitForThreadLoaded).toHaveBeenCalledWith({
+      endpoint: 'ws://127.0.0.1:8795',
+      threadId: 'thread-local-1',
+    });
+    expect(sessionManager.handleSessionStart).toHaveBeenCalledWith({
+      session_id: 'thread-local-1',
+      model: 'gpt-5.4',
+      turn_id: 'turn-local-1',
+      project: 'poc',
+      cwd: '/tmp/poc',
+      last_user_message: 'bootstrap local session',
+      session_mode: 'local-managed',
+      local_attachment_id: 'tl-local-thread-local-1',
+      remote_endpoint: 'ws://127.0.0.1:8795',
+      remote_thread_id: 'thread-local-1',
+    });
+    expect(localConsoleRuntime.ensureAttached).toHaveBeenCalledWith({
+      sessionId: 'thread-local-1',
+      endpoint: 'ws://127.0.0.1:8795',
+      cwd: '/tmp/poc',
+      knownAttachmentId: 'tl-local-thread-local-1',
+      knownLogPath: null,
+    });
+  });
+
+  it('rejects local managed session start without bootstrap text', async () => {
+    const app = createDaemonApp({
+      store: {
+        save: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn(() => []),
+      } as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+      appServerClient: {
+        createThread: vi.fn(),
+      } as any,
+      appServerRuntime: {
+        ensureAvailable: vi.fn(),
+      } as any,
+      remoteWorkerRuntime: {} as any,
+      remoteStopController: {} as any,
+      localConsoleRuntime: {} as any,
       config: {
         localCodexEndpoint: 'ws://127.0.0.1:8795',
       } as any,
@@ -494,25 +593,59 @@ describe('daemon entrypoint', () => {
       }),
     });
 
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: 'Missing initial_text',
+    });
+  });
+
+  it('registers a blank tl open for daemon-side adoption', async () => {
+    const localManagedOpenController = {
+      registerPendingOpen: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const app = createDaemonApp({
+      store: {
+        save: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn(() => []),
+      } as any,
+      replyQueue: {} as any,
+      sessionManager: {} as any,
+      localManagedOpenController: localManagedOpenController as any,
+      config: {
+        localCodexEndpoint: 'ws://127.0.0.1:8795',
+      } as any,
+    });
+
+    const response = await app.request('http://localhost/local/open/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        attachment_id: 'tl-open-session',
+        log_path: '/tmp/tl-open.log',
+        cwd: '/tmp/poc',
+        project: 'blank-open-project',
+        model: 'gpt-5.4',
+        known_thread_ids: ['thread-existing-1', 'thread-existing-2'],
+      }),
+    });
+
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      status: 'started',
-      session_id: 'thread-local-1',
-      topic_id: 91,
-      mode: 'local-managed',
-      endpoint: 'ws://127.0.0.1:8795',
-      thread_id: 'thread-local-1',
-    });
-    expect(appServerRuntime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:8795', '/tmp/poc');
-    expect(sessionManager.handleSessionStart).toHaveBeenCalledWith({
-      session_id: 'thread-local-1',
-      model: 'gpt-5.4',
-      turn_id: '',
-      project: 'poc',
+      status: 'registered',
+      attachment_id: 'tl-open-session',
       cwd: '/tmp/poc',
-      last_user_message: '',
-      remote_endpoint: 'ws://127.0.0.1:8795',
-      remote_thread_id: 'thread-local-1',
+      project: 'blank-open-project',
+      endpoint: 'ws://127.0.0.1:8795',
+    });
+    expect(localManagedOpenController.registerPendingOpen).toHaveBeenCalledWith({
+      attachmentId: 'tl-open-session',
+      logPath: '/tmp/tl-open.log',
+      cwd: '/tmp/poc',
+      project: 'blank-open-project',
+      model: 'gpt-5.4',
+      endpoint: 'ws://127.0.0.1:8795',
+      knownThreadIds: ['thread-existing-1', 'thread-existing-2'],
     });
   });
 
@@ -546,7 +679,7 @@ describe('daemon entrypoint', () => {
       local_last_input_source: null,
       local_last_input_at: null,
       local_last_injection_error: null,
-      local_attachment_id: 'thread-local-1',
+      local_attachment_id: 'tl-local-thread-local-1',
       remote_mode_enabled: true,
       remote_input_owner: 'telegram',
       remote_status: 'attached',
@@ -583,7 +716,7 @@ describe('daemon entrypoint', () => {
     const response = await app.request('http://localhost/local/status?session_id=thread-local-1');
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(await response.json()).toMatchObject({
       session_id: 'thread-local-1',
       mode: 'local-managed',
       endpoint: 'ws://127.0.0.1:8795',
@@ -592,9 +725,11 @@ describe('daemon entrypoint', () => {
       cwd: '/tmp/poc',
       local_bridge_enabled: true,
       local_bridge_state: 'attached',
-      local_attachment_id: 'thread-local-1',
+      local_attachment_id: 'tl-local-thread-local-1',
       remote_status: 'attached',
       attached: true,
+      total_turns: 0,
+      pristine: true,
     });
   });
 
@@ -750,7 +885,7 @@ describe('daemon entrypoint', () => {
     const response = await app.request('http://localhost/remote/status?session_id=s1');
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(await response.json()).toMatchObject({
       session_id: 's1',
       mode: 'remote-managed',
       remote_mode_enabled: true,
@@ -768,6 +903,8 @@ describe('daemon entrypoint', () => {
       worker_log_path: '/tmp/worker.log',
       worker_last_error: null,
       attached: true,
+      total_turns: 1,
+      pristine: false,
     });
   });
 

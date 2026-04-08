@@ -65,8 +65,10 @@ function makeTelegramBot() {
     sendStopMessage: vi.fn().mockResolvedValue(200),
     sendCompleteMessage: vi.fn().mockResolvedValue(undefined),
     sendResumeAckMessage: vi.fn().mockResolvedValue(undefined),
+    sendTopicText: vi.fn().mockResolvedValue(undefined),
     sendWorkingMessage: vi.fn().mockResolvedValue(undefined),
     sendHeartbeatMessage: vi.fn().mockResolvedValue(undefined),
+    sendTypingAction: vi.fn().mockResolvedValue(undefined),
     sendErrorMessage: vi.fn().mockResolvedValue(undefined),
     addReaction: vi.fn().mockResolvedValue(undefined),
     getSessionByTopic: vi.fn(),
@@ -194,6 +196,35 @@ describe('SessionManagerImpl', () => {
           remote_status: 'attached',
           remote_endpoint: 'ws://127.0.0.1:8899',
           remote_thread_id: 'remote-thread-1',
+        })
+      );
+    });
+
+    it('creates a local-managed session when explicitly requested', async () => {
+      await manager.handleSessionStart({
+        session_id: 'local-thread-1',
+        model: 'gpt-4',
+        turn_id: 't1',
+        project: 'myproj',
+        cwd: '/tmp/myproj',
+        last_user_message: 'hello',
+        remote_endpoint: 'ws://127.0.0.1:8899',
+        session_mode: 'local-managed',
+        local_attachment_id: 'tl-open-local-thread-1',
+      });
+
+      expect(store.create).toHaveBeenCalledWith(
+        'local-thread-1',
+        expect.objectContaining({
+          mode: 'local-managed',
+          remote_mode_enabled: true,
+          remote_input_owner: 'tui',
+          remote_status: 'attached',
+          remote_endpoint: 'ws://127.0.0.1:8899',
+          remote_thread_id: 'local-thread-1',
+          local_bridge_enabled: true,
+          local_bridge_state: 'attached',
+          local_attachment_id: 'tl-open-local-thread-1',
         })
       );
     });
@@ -360,6 +391,48 @@ describe('SessionManagerImpl', () => {
       expect(store._sessions['s1'].remote_status).toBeNull();
       expect(store._sessions['s1'].stop_message_id).toBeNull();
     });
+
+    it('sends a non-blocking stop message for local-managed sessions', async () => {
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+        mode: 'local-managed',
+        total_turns: 2,
+        remote_mode_enabled: true,
+        remote_input_owner: 'tui',
+        remote_status: 'running',
+        remote_endpoint: 'ws://127.0.0.1:4321',
+        remote_thread_id: 'thread-1',
+        local_bridge_enabled: true,
+        local_bridge_state: 'attached',
+        local_attachment_id: 'tl-open-s1',
+      });
+
+      const result = await manager.handleStopAndWait({
+        session_id: 's1',
+        turn_id: 't1',
+        last_message: 'local managed output',
+        total_turns: 3,
+      });
+
+      expect(result).toEqual({ decision: 'continue' });
+      expect(replyQueue.waitFor).not.toHaveBeenCalled();
+      expect(tg.sendStopMessage).toHaveBeenCalledWith(
+        defaultConfig.groupId,
+        42,
+        't1',
+        'local managed output',
+        3,
+        expect.objectContaining({
+          mode: 'local-managed',
+          remoteStatus: 'running',
+          remoteOwner: 'tui',
+        })
+      );
+      expect(store._sessions['s1'].status).toBe('active');
+      expect(store._sessions['s1'].remote_status).toBe('idle');
+      expect(store._sessions['s1'].stop_message_id).toBe(200);
+    });
   });
 
   describe('handleComplete', () => {
@@ -434,6 +507,7 @@ describe('SessionManagerImpl', () => {
 
   describe('handleWorking', () => {
     it('sends a working message on user prompt submit for an active root session', async () => {
+      vi.useFakeTimers();
       store._sessions['s1'] = makeRecord({
         status: 'active',
         topic_id: 42,
@@ -441,10 +515,23 @@ describe('SessionManagerImpl', () => {
 
       await manager.handleWorking({
         session_id: 's1',
+        prompt: 'continue exactly as typed',
       });
 
+      expect(tg.sendTopicText).toHaveBeenCalledWith(
+        defaultConfig.groupId,
+        42,
+        'continue exactly as typed'
+      );
       expect(tg.sendWorkingMessage).toHaveBeenCalledWith(defaultConfig.groupId, 42);
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(1);
       expect(store._sessions['s1'].last_progress_at).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(2);
     });
 
     it('does not emit a working Telegram message for remote-managed sessions', async () => {
@@ -461,10 +548,44 @@ describe('SessionManagerImpl', () => {
 
       await manager.handleWorking({
         session_id: 's1',
+        prompt: 'do not mirror this remotely',
       });
 
+      expect(tg.sendTopicText).not.toHaveBeenCalled();
       expect(tg.sendWorkingMessage).not.toHaveBeenCalled();
+      expect(tg.sendTypingAction).not.toHaveBeenCalled();
       expect(store._sessions['s1'].remote_status).toBe('idle');
+    });
+
+    it('emits a working Telegram message for local-managed sessions', async () => {
+      vi.useFakeTimers();
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+        mode: 'local-managed',
+        remote_mode_enabled: true,
+        remote_input_owner: 'tui',
+        remote_status: 'idle',
+        remote_endpoint: 'ws://127.0.0.1:4321',
+        remote_thread_id: 'thread-1',
+        local_bridge_enabled: true,
+        local_bridge_state: 'attached',
+        local_attachment_id: 'tl-open-s1',
+      });
+
+      await manager.handleWorking({
+        session_id: 's1',
+        prompt: 'continue from tui',
+      });
+
+      expect(tg.sendTopicText).toHaveBeenCalledWith(
+        defaultConfig.groupId,
+        42,
+        'continue from tui'
+      );
+      expect(tg.sendWorkingMessage).toHaveBeenCalledWith(defaultConfig.groupId, 42);
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(1);
+      expect(store._sessions['s1'].remote_status).toBe('running');
     });
 
     it('sends throttled heartbeat messages after working starts', async () => {
@@ -476,6 +597,7 @@ describe('SessionManagerImpl', () => {
 
       await manager.handleWorking({
         session_id: 's1',
+        prompt: 'hello',
       });
 
       await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
@@ -486,6 +608,54 @@ describe('SessionManagerImpl', () => {
 
       await vi.advanceTimersByTimeAsync(1 * 60 * 1000);
       expect(tg.sendHeartbeatMessage).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('handleManagedTurnSettled', () => {
+    it('clears working timestamps and heartbeat timers for local-managed sessions', async () => {
+      vi.useFakeTimers();
+      store._sessions['s1'] = makeRecord({
+        status: 'active',
+        topic_id: 42,
+        mode: 'local-managed',
+        total_turns: 2,
+        remote_mode_enabled: true,
+        remote_input_owner: 'tui',
+        remote_status: 'idle',
+        remote_endpoint: 'ws://127.0.0.1:4321',
+        remote_thread_id: 'thread-1',
+        local_bridge_enabled: true,
+        local_bridge_state: 'attached',
+        local_attachment_id: 'tl-open-s1',
+      });
+
+      await manager.handleWorking({
+        session_id: 's1',
+      });
+
+      expect(store._sessions['s1'].remote_status).toBe('running');
+      expect(store._sessions['s1'].last_progress_at).not.toBeNull();
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(1);
+
+      await manager.handleManagedTurnSettled({
+        session_id: 's1',
+        turn_id: 'turn-3',
+        last_message: 'done',
+        total_turns: 3,
+        last_user_message: 'hello',
+        remote_input_owner: 'tui',
+      });
+
+      expect(store._sessions['s1'].remote_status).toBe('idle');
+      expect(store._sessions['s1'].remote_last_turn_id).toBe('turn-3');
+      expect(store._sessions['s1'].last_turn_output).toBe('done');
+      expect(store._sessions['s1'].last_user_message).toBe('hello');
+      expect(store._sessions['s1'].last_progress_at).toBeNull();
+      expect(store._sessions['s1'].last_heartbeat_at).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(tg.sendHeartbeatMessage).not.toHaveBeenCalled();
+      expect(tg.sendTypingAction).toHaveBeenCalledTimes(1);
     });
   });
 });

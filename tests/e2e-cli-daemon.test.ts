@@ -116,6 +116,38 @@ describe.sequential('TL CLI + daemon E2E', () => {
     }
   });
 
+  it('creates a local-managed session from hook-session-start env metadata', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      const transcriptPath = harness.writeTranscript([
+        ['user', 'local managed open'],
+        ['final', 'ready'],
+      ]);
+
+      const start = await harness.runCli(
+        ['hook-session-start'],
+        harness.sessionStartPayload('local-open-s1', transcriptPath),
+        {
+          TL_REMOTE_ENDPOINT: 'ws://127.0.0.1:8899',
+          TL_SESSION_MODE: 'local-managed',
+          TL_LOCAL_ATTACHMENT_ID: 'tl-open-local-open-s1',
+        }
+      );
+      expect(start.code).toBe(0);
+
+      await vi.waitFor(() => {
+        const session = harness.store.get('local-open-s1')?.record;
+        expect(session?.mode).toBe('local-managed');
+        expect(session?.remote_mode_enabled).toBe(true);
+        expect(session?.remote_input_owner).toBe('tui');
+        expect(session?.local_bridge_enabled).toBe(true);
+        expect(session?.local_attachment_id).toBe('tl-open-local-open-s1');
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('returns continue when stop wait times out and restores the session to active', async () => {
     const harness = await TlE2EHarness.create({ stopTimeout: 1 });
     try {
@@ -172,7 +204,7 @@ describe.sequential('TL CLI + daemon E2E', () => {
     const harness = await TlE2EHarness.create({ stopTimeout: 5 });
     try {
       const start = await harness.runCli(
-        ['local', 'start', '--cwd', process.cwd(), '--project', 'local-managed-poc'],
+        ['local', 'start', '--cwd', process.cwd(), '--project', 'local-managed-poc', '--text', 'bootstrap local'],
         ''
       );
 
@@ -183,11 +215,12 @@ describe.sequential('TL CLI + daemon E2E', () => {
         mode: 'local-managed',
         endpoint: 'ws://127.0.0.1:8795',
       });
+      expect(payload.attachment_id).toMatch(/^tl-local-/);
 
       const session = harness.store.get(payload.session_id)?.record;
       expect(session?.local_bridge_enabled).toBe(true);
       expect(session?.local_bridge_state).toBe('attached');
-      expect(session?.local_attachment_id).toBe(payload.thread_id);
+      expect(session?.local_attachment_id).toBe(payload.attachment_id);
       expect(session?.remote_endpoint).toBe('ws://127.0.0.1:8795');
 
       const status = await harness.runCli(['local', 'status', payload.session_id], '');
@@ -198,7 +231,56 @@ describe.sequential('TL CLI + daemon E2E', () => {
         endpoint: 'ws://127.0.0.1:8795',
         local_bridge_enabled: true,
         local_bridge_state: 'attached',
+        pristine: true,
       });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('fails local managed start through the CLI when bootstrap text is missing', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      const start = await harness.runCli(
+        ['local', 'start', '--cwd', process.cwd(), '--project', 'local-managed-poc'],
+        ''
+      );
+
+      expect(start.code).toBe(1);
+      expect(start.stdout.trim()).toBe('');
+      expect(start.stderr).toContain('Missing initial_text');
+      expect(harness.telegram.count('topic')).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('deletes a topic by session id and optionally removes the session record', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      const transcriptPath = harness.writeTranscript([
+        ['user', 'cleanup me'],
+        ['final', 'done'],
+      ]);
+
+      const start = await harness.runCli(
+        ['hook-session-start'],
+        harness.sessionStartPayload('cleanup-s1', transcriptPath)
+      );
+      expect(start.code).toBe(0);
+
+      const deleted = await harness.runCli(
+        ['topic', 'delete', '--session', 'cleanup-s1', '--delete-session'],
+        ''
+      );
+      expect(deleted.code).toBe(0);
+      expect(JSON.parse(deleted.stdout)).toMatchObject({
+        status: 'deleted',
+        session_id: 'cleanup-s1',
+        session_deleted: true,
+      });
+      expect(harness.telegram.count('topic-deleted')).toBe(1);
+      expect(harness.store.get('cleanup-s1')).toBeUndefined();
     } finally {
       await harness.close();
     }
