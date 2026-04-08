@@ -119,10 +119,11 @@ export function createRemoteSessionStartHook(
 
 export function createTlHooksTemplate(
   cliScriptPath = '',
-  nodeBinary = 'node'
+  nodeBinary = 'node',
+  wrapperPath = TL_HOOK_WRAPPER_PATH
 ): HooksFile {
   if (cliScriptPath) {
-    writeHookRunnerScript(cliScriptPath, TL_HOOK_WRAPPER_PATH, nodeBinary);
+    writeHookRunnerScript(cliScriptPath, wrapperPath, nodeBinary);
   }
 
   return {
@@ -136,10 +137,11 @@ export function createTlHooksTemplate(
 export function ensureTlHooksInstalled(
   targetPath: string,
   cliScriptPath = '',
-  nodeBinary = 'node'
+  nodeBinary = 'node',
+  wrapperPath = TL_HOOK_WRAPPER_PATH
 ): EnsureTlHooksInstalledResult {
   if (cliScriptPath) {
-    writeHookRunnerScript(cliScriptPath, TL_HOOK_WRAPPER_PATH, nodeBinary);
+    writeHookRunnerScript(cliScriptPath, wrapperPath, nodeBinary);
   }
 
   const targetDir = path.dirname(targetPath);
@@ -148,7 +150,7 @@ export function ensureTlHooksInstalled(
   }
 
   if (!fs.existsSync(targetPath)) {
-    writeJsonAtomic(targetPath, createTlHooksTemplate(cliScriptPath, nodeBinary));
+    writeJsonAtomic(targetPath, createTlHooksTemplate(cliScriptPath, nodeBinary, wrapperPath));
     return {
       targetPath,
       changed: true,

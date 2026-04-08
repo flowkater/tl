@@ -125,7 +125,13 @@ describe('codex hooks installer', () => {
       )
     );
 
-    const result = ensureTlHooksInstalled(hooksPath, '/app/project/dist/cli.js');
+    const wrapperPath = path.join(testDir, 'tl-hook.sh');
+    const result = ensureTlHooksInstalled(
+      hooksPath,
+      '/app/project/dist/cli.js',
+      'node',
+      wrapperPath
+    );
 
     expect(result.changed).toBe(true);
     expect(result.commandsInstalled).toContain(TL_SESSION_START_HOOK.command);
@@ -134,6 +140,7 @@ describe('codex hooks installer', () => {
     const saved = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
     expect(saved.hooks.SessionStart[0].hooks[0]).toEqual(TL_SESSION_START_HOOK);
     expect(saved.hooks.Stop[0].hooks[0]).toEqual(TL_STOP_HOOK);
+    expect(fs.readFileSync(wrapperPath, 'utf-8')).toContain('TL_CLI_PATH="/app/project/dist/cli.js"');
   });
 
   it('creates the hook runner script when cliScriptPath is provided', () => {
