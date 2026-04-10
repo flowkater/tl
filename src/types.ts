@@ -42,6 +42,7 @@ export interface SessionRecord {
   local_last_input_at?: string | null;
   local_last_injection_error?: string | null;
   local_attachment_id?: string | null;
+  pending_spawn_preferences?: DeferredLaunchPreferences | null;
   remote_mode_enabled: boolean;
   remote_input_owner: RemoteInputOwner | null;
   remote_status: RemoteSessionStatus | null;
@@ -63,6 +64,56 @@ export interface SessionRecord {
 export interface SessionsFile {
   sessions: Record<string, SessionRecord>;  // key = session_id
   version: number;             // 스키마 버전 (기본 1)
+}
+
+// ===== Telegram directives / topic preferences =====
+export type TelegramDirectiveField =
+  | 'skill'
+  | 'cmd'
+  | 'model'
+  | 'approval-policy'
+  | 'sandbox'
+  | 'cwd';
+
+export type TelegramListDirectiveField = 'skill' | 'cmd';
+export type TelegramScalarDirectiveField = Exclude<TelegramDirectiveField, TelegramListDirectiveField>;
+export type ApprovalPolicy = 'never' | 'on-request' | 'on-failure' | 'untrusted';
+export type SandboxMode = 'danger-full-access' | 'workspace-write' | 'read-only';
+
+export interface TelegramDirectiveValues {
+  skill?: string[];
+  cmd?: string[];
+  model?: string;
+  'approval-policy'?: ApprovalPolicy;
+  sandbox?: SandboxMode;
+  cwd?: string;
+}
+
+export type DeferredLaunchPreferences = Pick<
+  TelegramDirectiveValues,
+  'model' | 'approval-policy' | 'sandbox' | 'cwd'
+>;
+
+export interface TopicPreferences extends TelegramDirectiveValues {
+  updated_at: string;
+}
+
+export interface TopicPreferencesFile {
+  version: number;
+  topics: Record<string, TopicPreferences>;
+}
+
+export type TelegramControlCommand =
+  | { kind: 'help' }
+  | { kind: 'status' }
+  | { kind: 'resume' }
+  | { kind: 'showConfig' }
+  | { kind: 'set'; field: TelegramDirectiveField; value: string | string[] }
+  | { kind: 'clear'; field: TelegramDirectiveField };
+
+export interface ParsedTelegramDirectiveMessage {
+  body: string;
+  directives: TelegramDirectiveValues;
 }
 
 // ===== 런타임 상태 (메모리 전용, 영속화 안 함) =====

@@ -133,6 +133,63 @@ describe('local-console-runtime', () => {
     ]);
   });
 
+  it('preserves sandbox-only launch preferences without synthesizing approval flags', async () => {
+    const screenCalls: Array<{ args: string[]; stdio?: string }> = [];
+    let hasSessionChecks = 0;
+    const spawnImpl = vi.fn((command: string, args: string[], options?: { stdio?: string }) => {
+      expect(command).toBe('screen');
+      screenCalls.push({ args, stdio: options?.stdio });
+
+      const child = new FakeChildProcess();
+      child.pid = 6161;
+
+      queueMicrotask(() => {
+        if (args[0] === '-dmS') {
+          child.emit('spawn');
+          child.emit('close', 0);
+          return;
+        }
+
+        if (args[0] === '-ls') {
+          hasSessionChecks += 1;
+          child.stdout.emit(
+            'data',
+            Buffer.from(hasSessionChecks >= 2 ? 'tl-local-session-2' : '')
+          );
+          child.emit('close', hasSessionChecks >= 2 ? 0 : 1);
+          return;
+        }
+
+        child.emit('close', 0);
+      });
+
+      return child as any;
+    });
+
+    const runtime = new LocalConsoleRuntimeManager({
+      spawnImpl,
+      startupDelayMs: 0,
+    });
+
+    await runtime.ensureAttached({
+      sessionId: 'session-2',
+      endpoint: 'ws://127.0.0.1:8795',
+      cwd: '/tmp/project',
+      launchPrefs: {
+        sandbox: 'workspace-write',
+      },
+    });
+
+    expect(screenCalls[1]?.args).toEqual([
+      '-dmS',
+      'tl-local-session-2',
+      '-L',
+      'bash',
+      '-lc',
+      "cd '/tmp/project' && exec codex 'resume' '--remote' 'ws://127.0.0.1:8795' '--sandbox' 'workspace-write' '--no-alt-screen' '--cd' '/tmp/project' 'session-2'",
+    ]);
+  });
+
   it('attaches to the existing screen session', async () => {
     const child = new FakeChildProcess();
     const spawnImpl = vi.fn(() => child as any);

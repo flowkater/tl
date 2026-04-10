@@ -36,6 +36,7 @@ import {
 } from './types.js';
 import { PluginInstaller } from './plugin-installer.js';
 import { AppServerRuntimeManager } from './app-server-runtime.js';
+import { OPEN_COMMAND_USAGE, parseOpenArgs } from './open-command-args.js';
 
 function getConfigDir(): string {
   return process.env.TL_CONFIG_DIR || path.join(os.homedir(), '.tl');
@@ -258,7 +259,7 @@ async function cmdSessions(args: string[]) {
           })
         : '-';
       console.log(
-        `  ${emoji} ${s.session_id.slice(0, 12)}  ${s.status.padEnd(9)}  ${s.project || '-'}  ${since}`
+        `  ${emoji} ${s.session_id}  ${s.status.padEnd(9)}  ${s.project || '-'}  ${since}`
       );
     }
     console.log(`\nTotal: ${sessions.length}`);
@@ -672,38 +673,17 @@ function buildOpenAttachmentId(): string {
 }
 
 async function cmdOpen(args: string[]) {
-  let cwd = process.cwd();
-  let model = 'gpt-5.4';
-  let text = '';
-  let project = '';
-  let endpoint = '';
+  let cwd: string;
+  let model: string;
+  let text: string;
+  let project: string;
+  let endpoint: string;
 
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg === '--cwd') {
-      cwd = args[i + 1] ?? cwd;
-      i += 1;
-      continue;
-    }
-    if (arg === '--model') {
-      model = args[i + 1] ?? model;
-      i += 1;
-      continue;
-    }
-    if (arg === '--text') {
-      text = args[i + 1] ?? '';
-      i += 1;
-      continue;
-    }
-    if (arg === '--project') {
-      project = args[i + 1] ?? '';
-      i += 1;
-      continue;
-    }
-    if (arg === '--endpoint') {
-      endpoint = args[i + 1] ?? '';
-      i += 1;
-    }
+  try {
+    ({ cwd, model, text, project, endpoint } = parseOpenArgs(args, process.cwd()));
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    process.exit(1);
   }
 
   await ensureDaemonRunning();
@@ -1423,6 +1403,7 @@ tl — Codex ↔ Telegram Bridge
 
 Usage:
   tl open ...                  Start and attach a local-managed Codex session
+                               ${OPEN_COMMAND_USAGE}
   tl start                     Start the daemon
   tl stop                      Stop the daemon
   tl status                    Show daemon status

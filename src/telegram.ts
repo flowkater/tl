@@ -3,18 +3,47 @@ import https from 'node:https';
 import path from 'path';
 import { Bot, Context } from 'grammy';
 import {
+  ApprovalPolicy,
   DaemonConfig,
+  DeferredLaunchPreferences,
   RemoteInputOwner,
   RemoteSessionStatus,
+  SandboxMode,
   SessionMode,
   SessionRecord,
+  TelegramControlCommand,
+  TelegramDirectiveField,
+  TelegramDirectiveValues,
+  TopicPreferences,
 } from './types.js';
 import { ReplyQueue } from './reply-queue.js';
 import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
+import {
+  compileDirectivePrompt,
+  parseTelegramControlCommand,
+  parseTelegramDirectiveMessage,
+} from './telegram-directives.js';
 
 type LateReplyHandler = (sessionId: string, replyText: string) => Promise<boolean>;
 type RemoteReplyHandler = (sessionId: string, replyText: string) => Promise<boolean>;
+type TopicPreferencesAccessor = {
+  get(topicKey: string): TopicPreferences | undefined;
+  set(topicKey: string, preferences: Partial<TopicPreferences>): void;
+  clearField(topicKey: string, field: TelegramDirectiveField): void;
+  save(): Promise<void>;
+};
+
+type ResolvedTelegramDirectives = {
+  immediate: Pick<TelegramDirectiveValues, 'skill' | 'cmd'>;
+  deferred: DeferredLaunchPreferences;
+};
+
+type NormalizedTopicPrompt = {
+  prompt: string;
+  deferred: DeferredLaunchPreferences;
+  hasDeferredOverride: boolean;
+};
 
 export class TelegramBot {
   private static readonly SEND_RETRY_COUNT = 3;
@@ -25,13 +54,20 @@ export class TelegramBot {
   private config: DaemonConfig;
   private store: SessionsStore;
   private replyQueue: ReplyQueue;
+  private topicPreferences: TopicPreferencesAccessor | null;
   private lateReplyHandler: LateReplyHandler | null = null;
   private remoteReplyHandler: RemoteReplyHandler | null = null;
 
-  constructor(config: DaemonConfig, store: SessionsStore, replyQueue: ReplyQueue) {
+  constructor(
+    config: DaemonConfig,
+    store: SessionsStore,
+    replyQueue: ReplyQueue,
+    topicPreferences?: TopicPreferencesAccessor | null
+  ) {
     this.config = config;
     this.store = store;
     this.replyQueue = replyQueue;
+    this.topicPreferences = topicPreferences ?? null;
   }
 
   setLateReplyHandler(handler: LateReplyHandler): void {
@@ -427,19 +463,58 @@ export class TelegramBot {
     if (!replyText.trim()) {
       return;
     }
-    if (this.isStatusCommand(replyText.trim())) {
+    const trimmedText = replyText.trim();
+    if (this.isStatusCommand(trimmedText)) {
       await this.sendStatusMessage(ctx.chat.id, message.message_thread_id);
       return;
+    }
+
+    const matched = this.matchMessageToSession(message);
+
+    const effectiveTopicId = message.message_thread_id ?? matched?.record.topic_id;
+
+    if (this.isTelegramControlCommand(trimmedText)) {
+      await this.handleTelegramControlCommand(
+        trimmedText,
+        ctx.chat.id,
+        effectiveTopicId,
+        matched
+      );
+      return;
+    }
+
+    let normalizedPrompt = trimmedText;
+    let deferredLaunchPreferences: DeferredLaunchPreferences = {};
+    let hasDeferredOverride = false;
+    if (effectiveTopicId) {
+      try {
+        const normalized = this.normalizeTopicPrompt(
+          ctx.chat.id,
+          effectiveTopicId,
+          trimmedText
+        );
+        normalizedPrompt = normalized.prompt;
+        deferredLaunchPreferences = normalized.deferred;
+        hasDeferredOverride = normalized.hasDeferredOverride;
+      } catch (err) {
+        await this.sendTopicFeedback(
+          ctx.chat.id,
+          effectiveTopicId,
+          `⚠️ ${(err as Error).message}`
+        );
+        return;
+      }
     }
 
     // 1. reply가 있으면 먼저 stop_message_id로 전역 매칭한다.
     const replyTo = message.reply_to_message;
     if (replyTo) {
-      const matched = this.matchReplyToSession(replyTo.message_id);
       if (matched) {
         await this.routeMatchedMessage(
           matched,
-          replyText.trim(),
+          normalizedPrompt,
+          deferredLaunchPreferences,
+          hasDeferredOverride,
           ctx.chat.id,
           message.message_id,
           true,
@@ -451,11 +526,12 @@ export class TelegramBot {
 
     // 2. thread_id가 있으면 해당 topic의 최신 세션으로 라우팅한다.
     if (message.message_thread_id) {
-      const session = this.getLatestSessionByTopic(message.message_thread_id);
-      if (session) {
+      if (matched) {
         await this.routeMatchedMessage(
-          session,
-          replyText.trim(),
+          matched,
+          normalizedPrompt,
+          deferredLaunchPreferences,
+          hasDeferredOverride,
           ctx.chat.id,
           message.message_id,
           true,
@@ -484,9 +560,32 @@ export class TelegramBot {
     // 그 외에는 무시
   }
 
+  private matchMessageToSession(
+    message: {
+      message_thread_id?: number;
+      reply_to_message?: { message_id: number };
+    }
+  ): { id: string; record: SessionRecord } | null {
+    const replyTo = message.reply_to_message;
+    if (replyTo) {
+      const matched = this.matchReplyToSession(replyTo.message_id);
+      if (matched) {
+        return matched;
+      }
+    }
+
+    if (message.message_thread_id) {
+      return this.getLatestSessionByTopic(message.message_thread_id);
+    }
+
+    return null;
+  }
+
   private async routeMatchedMessage(
     matched: { id: string; record: SessionRecord },
     replyText: string,
+    deferredLaunchPreferences: DeferredLaunchPreferences,
+    hasDeferredOverride: boolean,
     chatId: number,
     messageId: number,
     allowLateReplyFromActive: boolean,
@@ -496,6 +595,8 @@ export class TelegramBot {
       const handled = await this.routeRemoteManagedMessage(
         matched,
         replyText,
+        deferredLaunchPreferences,
+        hasDeferredOverride,
         chatId,
         messageId,
         sourceThreadId
@@ -509,11 +610,19 @@ export class TelegramBot {
       try {
         const handled = await this.remoteReplyHandler(matched.id, replyText);
         if (handled) {
+          await this.persistPendingSpawnPreferences(
+            matched.id,
+            deferredLaunchPreferences,
+            hasDeferredOverride
+          );
           await this.addReaction(
             chatId,
             messageId,
             this.config.emojiReaction
           );
+          if (hasDeferredOverride) {
+            await this.sendDeferredOverrideAck(chatId, sourceThreadId ?? matched.record.topic_id);
+          }
           return;
         }
       } catch (err) {
@@ -530,11 +639,19 @@ export class TelegramBot {
         replyText
       );
       if (delivered) {
+        await this.persistPendingSpawnPreferences(
+          matched.id,
+          deferredLaunchPreferences,
+          hasDeferredOverride
+        );
         await this.addReaction(
           chatId,
           messageId,
           this.config.emojiReaction
         );
+        if (hasDeferredOverride) {
+          await this.sendDeferredOverrideAck(chatId, sourceThreadId ?? matched.record.topic_id);
+        }
       } else {
         await this.sendNotWaitingMessage(
           chatId,
@@ -551,11 +668,19 @@ export class TelegramBot {
       try {
         const handled = await this.lateReplyHandler(matched.id, replyText);
         if (handled) {
+          await this.persistPendingSpawnPreferences(
+            matched.id,
+            deferredLaunchPreferences,
+            hasDeferredOverride
+          );
           await this.addReaction(
             chatId,
             messageId,
             this.config.emojiReaction
           );
+          if (hasDeferredOverride) {
+            await this.sendDeferredOverrideAck(chatId, sourceThreadId ?? matched.record.topic_id);
+          }
           return;
         }
       } catch (err) {
@@ -575,6 +700,8 @@ export class TelegramBot {
   private async routeRemoteManagedMessage(
     matched: { id: string; record: SessionRecord },
     replyText: string,
+    deferredLaunchPreferences: DeferredLaunchPreferences,
+    hasDeferredOverride: boolean,
     chatId: number,
     messageId: number,
     sourceThreadId?: number
@@ -590,7 +717,15 @@ export class TelegramBot {
     try {
       const handled = await this.remoteReplyHandler(matched.id, replyText);
       if (handled) {
+        await this.persistPendingSpawnPreferences(
+          matched.id,
+          deferredLaunchPreferences,
+          hasDeferredOverride
+        );
         await this.addReaction(chatId, messageId, this.config.emojiReaction);
+        if (hasDeferredOverride) {
+          await this.sendDeferredOverrideAck(chatId, sourceThreadId ?? matched.record.topic_id);
+        }
         return true;
       }
     } catch (err) {
@@ -696,6 +831,386 @@ export class TelegramBot {
     return /^\/tl-status(?:@\w+)?$/.test(text);
   }
 
+  private isTelegramControlCommand(text: string): boolean {
+    return /^\/tl(?:@\w+)?(?:\s|$)/i.test(text);
+  }
+
+  private async handleTelegramControlCommand(
+    text: string,
+    chatId: number,
+    topicId: number | undefined,
+    matched: { id: string; record: SessionRecord } | null
+  ): Promise<void> {
+    let command: TelegramControlCommand;
+    try {
+      command = parseTelegramControlCommand(text);
+    } catch (err) {
+      await this.sendTopicFeedback(chatId, topicId, `⚠️ ${(err as Error).message}`);
+      return;
+    }
+
+    switch (command.kind) {
+      case 'help':
+        await this.sendTopicFeedback(
+          chatId,
+          topicId,
+          [
+            'TL commands:',
+            '/tl help',
+            '/tl status',
+            '/tl resume',
+            '/tl show config',
+            '/tl set <field> <value>',
+            '/tl clear <field>',
+          ].join('\n')
+        );
+        return;
+      case 'status':
+        await this.sendTopicFeedback(
+          chatId,
+          topicId,
+          this.renderTopicStatus(chatId, topicId, matched)
+        );
+        return;
+      case 'resume':
+        await this.handleTelegramResumeCommand(chatId, topicId, matched);
+        return;
+      case 'showConfig':
+        await this.handleShowConfigCommand(chatId, topicId);
+        return;
+      case 'set':
+        await this.handleSetPreferenceCommand(chatId, topicId, command.field, command.value);
+        return;
+      case 'clear':
+        await this.handleClearPreferenceCommand(chatId, topicId, command.field);
+        return;
+      default:
+        return;
+    }
+  }
+
+  private async handleTelegramResumeCommand(
+    chatId: number,
+    topicId: number | undefined,
+    matched: { id: string; record: SessionRecord } | null
+  ): Promise<void> {
+    if (!topicId) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ /tl resume requires a topic thread');
+      return;
+    }
+    if (!matched || matched.record.status !== 'waiting') {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ no waiting session is attached to this topic');
+      return;
+    }
+
+    const delivered = this.replyQueue.deliver(matched.id, '/resume', {
+      queueIfMissing: false,
+    });
+    if (!delivered) {
+      await this.sendTopicFeedback(
+        chatId,
+        topicId,
+        '⚠️ resume delivery failed: no waiting consumer is attached to this topic'
+      );
+      return;
+    }
+
+    await this.sendTopicFeedback(chatId, topicId, '✅ resume delivered to waiting session');
+  }
+
+  private async handleShowConfigCommand(chatId: number, topicId?: number): Promise<void> {
+    if (!topicId) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ /tl show config requires a topic thread');
+      return;
+    }
+
+    const topicDefaults = this.getTopicDefaults(chatId, topicId);
+    const resolved = this.resolveTelegramDirectives(topicDefaults, {});
+    const matched = this.getLatestSessionByTopic(topicId);
+    const pendingSpawnPreferences = matched?.record.pending_spawn_preferences ?? resolved.deferred;
+    const lines = [
+      'Current topic config',
+      '',
+      `topic_key: ${this.buildTopicKey(chatId, topicId)}`,
+      'persisted:',
+      this.formatPreferences(topicDefaults),
+      '',
+      'effective immediate:',
+      this.formatImmediateDirectives(resolved.immediate),
+      '',
+      'pending spawn preferences:',
+      this.formatDeferredDirectives(pendingSpawnPreferences),
+    ];
+    await this.sendTopicFeedback(chatId, topicId, lines.join('\n'));
+  }
+
+  private async handleSetPreferenceCommand(
+    chatId: number,
+    topicId: number | undefined,
+    field: TelegramDirectiveField,
+    value: string | string[]
+  ): Promise<void> {
+    if (!topicId) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ /tl set requires a topic thread');
+      return;
+    }
+    if (!this.topicPreferences) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ topic preferences store unavailable');
+      return;
+    }
+
+    this.topicPreferences.set(this.buildTopicKey(chatId, topicId), {
+      [field]: value,
+    } as Partial<TopicPreferences>);
+    await this.topicPreferences.save();
+
+    await this.sendTopicFeedback(
+      chatId,
+      topicId,
+      `✅ topic defaults updated\n${this.formatPreferences(this.getTopicDefaults(chatId, topicId))}`
+    );
+  }
+
+  private async handleClearPreferenceCommand(
+    chatId: number,
+    topicId: number | undefined,
+    field: TelegramDirectiveField
+  ): Promise<void> {
+    if (!topicId) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ /tl clear requires a topic thread');
+      return;
+    }
+    if (!this.topicPreferences) {
+      await this.sendTopicFeedback(chatId, topicId, '⚠️ topic preferences store unavailable');
+      return;
+    }
+
+    this.topicPreferences.clearField(this.buildTopicKey(chatId, topicId), field);
+    await this.topicPreferences.save();
+
+    await this.sendTopicFeedback(
+      chatId,
+      topicId,
+      `✅ topic defaults updated\n${this.formatPreferences(this.getTopicDefaults(chatId, topicId))}`
+    );
+  }
+
+  private normalizeTopicPrompt(chatId: number, topicId: number, text: string): NormalizedTopicPrompt {
+    const parsed = parseTelegramDirectiveMessage(text);
+    const effective = this.resolveTelegramDirectives(
+      this.getTopicDefaults(chatId, topicId),
+      parsed.directives
+    );
+    const hasDeferredOverride = (
+      parsed.directives.model !== undefined
+      || parsed.directives['approval-policy'] !== undefined
+      || parsed.directives.sandbox !== undefined
+      || parsed.directives.cwd !== undefined
+    );
+    return {
+      prompt: compileDirectivePrompt({
+        body: parsed.body.trim(),
+        directives: effective.immediate,
+      }),
+      deferred: effective.deferred,
+      hasDeferredOverride,
+    };
+  }
+
+  private resolveTelegramDirectives(
+    topicDefaults: TopicPreferences | undefined,
+    messageDirectives: TelegramDirectiveValues
+  ): ResolvedTelegramDirectives {
+    const immediate: Pick<TelegramDirectiveValues, 'skill' | 'cmd'> = {};
+    const deferred: Omit<TelegramDirectiveValues, 'skill' | 'cmd'> = {};
+
+    for (const field of ['skill', 'cmd'] as const) {
+      const override = messageDirectives[field];
+      const fallback = topicDefaults?.[field];
+      if (override !== undefined) {
+        immediate[field] = override;
+      } else if (fallback !== undefined) {
+        immediate[field] = [...fallback];
+      }
+    }
+
+    for (const field of ['model', 'approval-policy', 'sandbox', 'cwd'] as const) {
+      const override = messageDirectives[field];
+      const fallback = topicDefaults?.[field];
+      const value = override ?? fallback;
+      if (value === undefined) {
+        continue;
+      }
+      if (field === 'model' || field === 'cwd') {
+        deferred[field] = value;
+      } else if (field === 'approval-policy') {
+        deferred['approval-policy'] = value as ApprovalPolicy;
+      } else {
+        deferred.sandbox = value as SandboxMode;
+      }
+    }
+
+    return { immediate, deferred };
+  }
+
+  private getTopicDefaults(chatId: number, topicId: number): TopicPreferences | undefined {
+    return this.topicPreferences?.get(this.buildTopicKey(chatId, topicId));
+  }
+
+  private buildTopicKey(chatId: number, topicId: number): string {
+    return `${chatId}:${topicId}`;
+  }
+
+  private async persistPendingSpawnPreferences(
+    sessionId: string,
+    deferred: DeferredLaunchPreferences,
+    hasDeferredOverride: boolean
+  ): Promise<void> {
+    if (!hasDeferredOverride) {
+      return;
+    }
+    if (
+      typeof (this.store as unknown as { update?: unknown }).update !== 'function'
+      || typeof (this.store as unknown as { save?: unknown }).save !== 'function'
+    ) {
+      return;
+    }
+
+    const hasDeferred = (
+      deferred.model !== undefined
+      || deferred['approval-policy'] !== undefined
+      || deferred.sandbox !== undefined
+      || deferred.cwd !== undefined
+    );
+    this.store.update(sessionId, (record) => {
+      record.pending_spawn_preferences = hasDeferred
+        ? { ...deferred }
+        : null;
+    });
+    await this.store.save();
+  }
+
+  private async sendDeferredOverrideAck(chatId: number, topicId?: number): Promise<void> {
+    await this.sendTopicFeedback(
+      chatId,
+      topicId,
+      'ℹ️ deferred spawn override saved for next managed spawn or reattach; current attached session is unchanged'
+    );
+  }
+
+  private async sendTopicFeedback(chatId: number, topicId: number | undefined, text: string): Promise<void> {
+    if (topicId) {
+      await this.sendTopicText(chatId, topicId, text);
+      return;
+    }
+
+    await this.sendChatLevelMessage(chatId, text);
+  }
+
+  private renderTopicStatus(
+    chatId: number,
+    topicId: number | undefined,
+    matched: { id: string; record: SessionRecord } | null
+  ): string {
+    const topicDefaults = topicId ? this.getTopicDefaults(chatId, topicId) : undefined;
+    const deferred = matched?.record.pending_spawn_preferences
+      ?? this.resolveTelegramDirectives(topicDefaults, {}).deferred;
+    return [
+      'Current topic status',
+      '',
+      `topic_key: ${topicId ? this.buildTopicKey(chatId, topicId) : 'none'}`,
+      `matched_session_id: ${matched?.id ?? 'none'}`,
+      `session_status: ${matched?.record.status ?? 'none'}`,
+      `mode: ${matched?.record.mode ?? 'none'}`,
+      `attachment: ${matched ? this.describeAttachment(matched.record) : 'none'}`,
+      `topic_defaults: ${topicDefaults ? 'configured' : 'none'}`,
+      `pending_spawn_preferences: ${this.describePendingSpawnPreferences(deferred)}`,
+    ].join('\n');
+  }
+
+  private describeAttachment(record: SessionRecord): string {
+    if (record.mode === 'local-managed') {
+      return record.local_attachment_id ?? 'local-managed';
+    }
+    if (record.mode === 'remote-managed') {
+      return record.remote_thread_id ?? 'remote-managed';
+    }
+    return 'local-hook';
+  }
+
+  private describePendingSpawnPreferences(
+    deferred: Omit<TelegramDirectiveValues, 'skill' | 'cmd'>
+  ): string {
+    const parts = [
+      deferred.model ? `model=${deferred.model}` : null,
+      deferred['approval-policy'] ? `approval-policy=${deferred['approval-policy']}` : null,
+      deferred.sandbox ? `sandbox=${deferred.sandbox}` : null,
+      deferred.cwd ? `cwd=${deferred.cwd}` : null,
+    ].filter((value): value is string => value !== null);
+
+    return parts.length > 0 ? parts.join(', ') : 'none';
+  }
+
+  private formatPreferences(preferences: TopicPreferences | undefined): string {
+    if (!preferences) {
+      return 'none';
+    }
+
+    const lines: string[] = [];
+    if (preferences.skill) {
+      lines.push(`skill: ${preferences.skill.join(', ')}`);
+    }
+    if (preferences.cmd) {
+      lines.push(`cmd: ${preferences.cmd.join(', ')}`);
+    }
+    if (preferences.model) {
+      lines.push(`model: ${preferences.model}`);
+    }
+    if (preferences['approval-policy']) {
+      lines.push(`approval-policy: ${preferences['approval-policy']}`);
+    }
+    if (preferences.sandbox) {
+      lines.push(`sandbox: ${preferences.sandbox}`);
+    }
+    if (preferences.cwd) {
+      lines.push(`cwd: ${preferences.cwd}`);
+    }
+    lines.push(`updated_at: ${preferences.updated_at}`);
+    return lines.join('\n');
+  }
+
+  private formatImmediateDirectives(
+    directives: Pick<TelegramDirectiveValues, 'skill' | 'cmd'>
+  ): string {
+    const lines: string[] = [];
+    if (directives.skill && directives.skill.length > 0) {
+      lines.push(`skill: ${directives.skill.join(', ')}`);
+    }
+    if (directives.cmd && directives.cmd.length > 0) {
+      lines.push(`cmd: ${directives.cmd.join(', ')}`);
+    }
+    return lines.length > 0 ? lines.join('\n') : 'none';
+  }
+
+  private formatDeferredDirectives(
+    directives: Omit<TelegramDirectiveValues, 'skill' | 'cmd'>
+  ): string {
+    const lines: string[] = [];
+    if (directives.model) {
+      lines.push(`model: ${directives.model}`);
+    }
+    if (directives['approval-policy']) {
+      lines.push(`approval-policy: ${directives['approval-policy']}`);
+    }
+    if (directives.sandbox) {
+      lines.push(`sandbox: ${directives.sandbox}`);
+    }
+    if (directives.cwd) {
+      lines.push(`cwd: ${directives.cwd}`);
+    }
+    return lines.length > 0 ? lines.join('\n') : 'none';
+  }
+
   // ===== MarkdownV2 이스케이프 =====
 
   private escapeMarkdownV2(text: string): string {
@@ -754,17 +1269,35 @@ export class TelegramBot {
           break;
         }
 
+        const retryDelayMs =
+          this.parseRetryAfterMs(lastError.message) ??
+          TelegramBot.SEND_RETRY_DELAY_MS;
+
         logger.warn('Telegram sendMessage failed, retrying', {
           chatId,
           topicId: options.message_thread_id,
           attempt,
           error: lastError.message,
         });
-        await this.delay(TelegramBot.SEND_RETRY_DELAY_MS);
+        await this.delay(retryDelayMs);
       }
     }
 
     throw lastError ?? new Error('sendMessage failed');
+  }
+
+  private parseRetryAfterMs(message: string): number | null {
+    const matched = /retry after\s+(\d+)/i.exec(message);
+    if (!matched) {
+      return null;
+    }
+
+    const seconds = Number.parseInt(matched[1], 10);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return null;
+    }
+
+    return seconds * 1_000;
   }
 
   private async delay(ms: number): Promise<void> {

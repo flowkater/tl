@@ -15,6 +15,42 @@ describe.sequential('TL CLI + daemon E2E', () => {
     }
   });
 
+  it('prints full session ids in sessions active output', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      harness.store.create('019d6bd0-1437-7f72-88ef-24f7952a159c', {
+        topic_id: 101,
+        status: 'active',
+        project: 'TL',
+        started_at: '2026-04-08T06:39:00.000Z',
+        turns: [],
+        total_turns: 0,
+        mode: 'local-managed',
+      });
+      harness.store.create('019d7332-4712-7c77-99aa-112233445566', {
+        topic_id: 102,
+        status: 'active',
+        project: 'todait-ios',
+        started_at: '2026-04-09T17:04:00.000Z',
+        turns: [],
+        total_turns: 0,
+        mode: 'local-managed',
+      });
+      await harness.store.save();
+
+      const result = await harness.runCli(['sessions', 'active'], '');
+
+      expect(result.code).toBe(0);
+      expect(result.stderr.trim()).toBe('');
+      expect(result.stdout).toContain('019d6bd0-1437-7f72-88ef-24f7952a159c');
+      expect(result.stdout).toContain('019d7332-4712-7c77-99aa-112233445566');
+      expect(result.stdout).not.toContain('019d6bd0-143  active');
+      expect(result.stdout).toContain('Total: 2');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('runs SessionStart -> Stop -> reply -> Working across real CLI and daemon', async () => {
     const harness = await TlE2EHarness.create({ stopTimeout: 5 });
     try {
@@ -233,6 +269,35 @@ describe.sequential('TL CLI + daemon E2E', () => {
         local_bridge_state: 'attached',
         pristine: true,
       });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rejects tl open with a positional session id before creating a new topic or session', async () => {
+    const harness = await TlE2EHarness.create({ stopTimeout: 5 });
+    try {
+      harness.store.create('019d6bd0-1437-7f72-88ef-24f7952a159c', {
+        topic_id: 727,
+        status: 'active',
+        project: 'TL',
+        started_at: '2026-04-08T06:39:15.821Z',
+        turns: [],
+        total_turns: 282,
+        mode: 'local-managed',
+      });
+      await harness.store.save();
+
+      const result = await harness.runCli(['open', '019d6bd0-1437-7f72-88ef-24f7952a159c'], '');
+
+      expect(result.code).toBe(1);
+      expect(result.stdout.trim()).toBe('');
+      expect(result.stderr).toContain('Unexpected positional argument for tl open');
+      expect(result.stderr).toContain('tl local open <session_id>');
+      expect(result.stderr).toContain('tl remote open <session_id>');
+      expect(harness.telegram.count('topic')).toBe(0);
+      expect(harness.store.listAll()).toHaveLength(1);
+      expect(harness.store.get('019d6bd0-1437-7f72-88ef-24f7952a159c')).toBeDefined();
     } finally {
       await harness.close();
     }

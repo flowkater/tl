@@ -198,6 +198,78 @@ describe('AppServerClient', () => {
     ]);
   });
 
+  it('retries turn/steer with the active turn id reported by app-server on mismatch', async () => {
+    const connection = new FakeConnection();
+    let steerAttempts = 0;
+    connection.request = async (method: string, params: unknown) => {
+      connection.calls.push({ method, params });
+      if (method === 'thread/read') {
+        return {
+          thread: {
+            id: 'thread-1',
+            turns: [{ id: 'turn-7', status: 'inProgress' }],
+          },
+        };
+      }
+      if (method === 'turn/steer') {
+        steerAttempts += 1;
+        if (steerAttempts === 1) {
+          throw new Error('expected active turn id `turn-7` but found `turn-6`');
+        }
+        return { turnId: 'turn-steered' };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    };
+
+    const factory: AppServerConnectionFactory = async () => connection;
+    const client = new AppServerClient(factory);
+
+    const result = await client.injectReply({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      replyText: 'interrupt with new instruction',
+    });
+
+    expect(result).toEqual({
+      mode: 'steer',
+      turnId: 'turn-steered',
+    });
+    expect(connection.calls).toEqual([
+      {
+        method: 'thread/read',
+        params: { threadId: 'thread-1', includeTurns: true },
+      },
+      {
+        method: 'turn/steer',
+        params: {
+          threadId: 'thread-1',
+          expectedTurnId: 'turn-7',
+          input: [
+            {
+              type: 'text',
+              text: 'interrupt with new instruction',
+              text_elements: [],
+            },
+          ],
+        },
+      },
+      {
+        method: 'turn/steer',
+        params: {
+          threadId: 'thread-1',
+          expectedTurnId: 'turn-6',
+          input: [
+            {
+              type: 'text',
+              text: 'interrupt with new instruction',
+              text_elements: [],
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('falls back to turn/start when thread/read cannot include turns before the first user message', async () => {
     const connection = new FakeConnection();
     connection.request = async (method: string, params: unknown) => {
@@ -290,7 +362,7 @@ describe('AppServerClient', () => {
     });
 
     expect(result).toEqual({
-      status: 'inProgress',
+      status: 'completed',
       outputText: 'remote final answer',
     });
     expect(connection.calls).toEqual([
@@ -298,21 +370,27 @@ describe('AppServerClient', () => {
         method: 'thread/read',
         params: { threadId: 'thread-1', includeTurns: true },
       },
+      {
+        method: 'thread/read',
+        params: { threadId: 'thread-1', includeTurns: true },
+      },
     ]);
   });
 
-  it('treats agent final_answer output as deliverable before status flips', async () => {
+  it('does not treat agent final_answer output as settled before status flips', async () => {
     const connection = new FakeConnection();
+    let readCount = 0;
     connection.request = async (method: string, params: unknown) => {
       connection.calls.push({ method, params });
       if (method === 'thread/read') {
+        readCount += 1;
         return {
           thread: {
             id: 'thread-1',
             turns: [
               {
                 id: 'turn-10',
-                status: 'inProgress',
+                status: readCount < 3 ? 'inProgress' : 'completed',
                 items: [
                   {
                     type: 'userMessage',
@@ -344,8 +422,41 @@ describe('AppServerClient', () => {
     });
 
     expect(result).toEqual({
-      status: 'inProgress',
+      status: 'completed',
       outputText: 'telegram-first output',
+    });
+    expect(connection.calls).toHaveLength(3);
+  });
+
+  it('returns a missing settlement status when the watched turn disappears without an active successor', async () => {
+    const connection = new FakeConnection();
+    connection.request = async (method: string, params: unknown) => {
+      connection.calls.push({ method, params });
+      if (method === 'thread/read') {
+        return {
+          thread: {
+            id: 'thread-1',
+            turns: [],
+          },
+        };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    };
+
+    const factory: AppServerConnectionFactory = async () => connection;
+    const client = new AppServerClient(factory);
+
+    const result = await client.waitForTurnToSettle({
+      endpoint: 'ws://127.0.0.1:4321',
+      threadId: 'thread-1',
+      turnId: 'turn-missing',
+      pollIntervalMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      outputText: '',
     });
   });
 });

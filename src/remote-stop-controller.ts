@@ -2,12 +2,14 @@ import { AppServerClient, type RemoteInjectResult } from './app-server-client.js
 import { AppServerRuntimeManager } from './app-server-runtime.js';
 import {
   hasRemoteSessionAttachment,
+  isLocalManagedSession,
   resolveManagedMode,
 } from './remote-mode.js';
 import { SessionsStore } from './store.js';
 import { logger } from './logger.js';
 import { RemoteWorkerRuntimeManager } from './remote-worker-runtime.js';
 import { LocalConsoleRuntimeManager } from './local-console-runtime.js';
+import type { DeferredLaunchPreferences, SessionRecord } from './types.js';
 
 type LateReplyFallback = {
   handle(sessionId: string, replyText: string): Promise<boolean>;
@@ -28,6 +30,19 @@ type RemoteStopControllerOptions = {
       totalTurns: number;
     }
   ) => Promise<number | null>;
+  settleManagedTurn?: (
+    sessionId: string,
+    args: {
+      turnId: string;
+      outputText: string;
+      totalTurns: number;
+      remoteInputOwner: 'telegram' | 'tui';
+    }
+  ) => Promise<void>;
+  resolveDeferredLaunchPreferences?: (
+    sessionId: string,
+    record: SessionRecord
+  ) => DeferredLaunchPreferences | undefined;
 };
 
 export type RemoteReplyHandleResult =
@@ -50,6 +65,8 @@ export class RemoteStopController {
   private notifyFailed?: RemoteStopControllerOptions['notifyFailed'];
   private notifyRecovering?: RemoteStopControllerOptions['notifyRecovering'];
   private publishTurnOutput?: RemoteStopControllerOptions['publishTurnOutput'];
+  private settleManagedTurn?: RemoteStopControllerOptions['settleManagedTurn'];
+  private resolveDeferredLaunchPreferences?: RemoteStopControllerOptions['resolveDeferredLaunchPreferences'];
 
   constructor(
     private store: SessionsStore,
@@ -64,6 +81,8 @@ export class RemoteStopController {
     this.notifyFailed = options.notifyFailed;
     this.notifyRecovering = options.notifyRecovering;
     this.publishTurnOutput = options.publishTurnOutput;
+    this.settleManagedTurn = options.settleManagedTurn;
+    this.resolveDeferredLaunchPreferences = options.resolveDeferredLaunchPreferences;
   }
 
   async handleReply(
@@ -75,24 +94,17 @@ export class RemoteStopController {
       return { handled: false, mode: 'not-remote' };
     }
 
+    const launchPrefs = this.getDeferredLaunchPreferences(sessionId, existing.record);
+    const effectiveCwd = launchPrefs?.cwd ?? existing.record.cwd;
+
     try {
-      if (existing.record.local_bridge_enabled === true && this.localConsoleRuntime) {
-        await this.ensureLocalConsoleAttached(
-          sessionId,
-          existing.record.remote_endpoint!,
-          existing.record.cwd,
-          existing.record.local_attachment_id,
-          existing.record.remote_worker_log_path
-        );
-      } else {
-        await this.ensureWorkerAttached(
-          sessionId,
-          existing.record.remote_endpoint!,
-          existing.record.cwd,
-          existing.record.remote_worker_pid,
-          existing.record.remote_worker_log_path
-        );
-      }
+      await this.ensureManagedAttachment(
+        sessionId,
+        existing.record,
+        existing.record.remote_endpoint!,
+        effectiveCwd,
+        launchPrefs
+      );
 
       this.store.update(sessionId, (record) => {
         record.mode = resolveManagedMode(record);
@@ -139,7 +151,7 @@ export class RemoteStopController {
         sessionId,
         existing.record.remote_endpoint!,
         existing.record.remote_thread_id!,
-        existing.record.cwd,
+        effectiveCwd,
         replyText
       );
       if (restarted.result) {
@@ -153,7 +165,7 @@ export class RemoteStopController {
         sessionId,
         existing.record.remote_endpoint!,
         existing.record.remote_thread_id!,
-        existing.record.cwd,
+        effectiveCwd,
         replyText
       );
       if (resumed.result) {
@@ -199,7 +211,8 @@ export class RemoteStopController {
     endpoint: string,
     cwd: string,
     knownPid?: number | null,
-    knownLogPath?: string | null
+    knownLogPath?: string | null,
+    launchPrefs?: DeferredLaunchPreferences
   ): Promise<void> {
     const worker = await this.workerRuntime.ensureAttached({
       sessionId,
@@ -207,6 +220,7 @@ export class RemoteStopController {
       cwd,
       knownPid,
       knownLogPath,
+      launchPrefs,
     });
 
     this.store.update(sessionId, (record) => {
@@ -226,7 +240,8 @@ export class RemoteStopController {
     endpoint: string,
     cwd: string,
     knownAttachmentId?: string | null,
-    knownLogPath?: string | null
+    knownLogPath?: string | null,
+    launchPrefs?: DeferredLaunchPreferences
   ): Promise<void> {
     if (!this.localConsoleRuntime) {
       throw new Error('Local console runtime unavailable');
@@ -238,6 +253,7 @@ export class RemoteStopController {
       cwd,
       knownAttachmentId,
       knownLogPath,
+      launchPrefs,
     });
 
     this.store.update(sessionId, (record) => {
@@ -260,15 +276,20 @@ export class RemoteStopController {
     cwd: string,
     replyText: string
   ): Promise<RemoteAttemptResult> {
+    const current = this.store.get(sessionId);
+    const launchPrefs = current
+      ? this.getDeferredLaunchPreferences(sessionId, current.record)
+      : undefined;
+    const effectiveCwd = launchPrefs?.cwd ?? cwd;
     try {
-      await this.runtime.ensureAvailable(endpoint, cwd);
-      const current = this.store.get(sessionId);
-      await this.ensureWorkerAttached(
+      await this.runtime.ensureAvailable(endpoint, effectiveCwd);
+      const currentAfterRestart = this.store.get(sessionId);
+      await this.ensureManagedAttachment(
         sessionId,
+        currentAfterRestart?.record,
         endpoint,
-        cwd,
-        current?.record.remote_worker_pid,
-        current?.record.remote_worker_log_path
+        effectiveCwd,
+        launchPrefs
       );
       const retried = await this.client.injectReply({
         endpoint,
@@ -319,22 +340,27 @@ export class RemoteStopController {
     replyText: string
   ): Promise<RemoteAttemptResult> {
     let resumedThreadId = threadId;
+    const current = this.store.get(sessionId);
+    const launchPrefs = current
+      ? this.getDeferredLaunchPreferences(sessionId, current.record)
+      : undefined;
+    const effectiveCwd = launchPrefs?.cwd ?? cwd;
     try {
       const resumedAt = new Date().toISOString();
       const resumed = await this.client.resumeThread({
         endpoint,
         threadId,
-        cwd,
+        cwd: effectiveCwd,
       });
       resumedThreadId = resumed.threadId;
 
-      const current = this.store.get(sessionId);
-      await this.ensureWorkerAttached(
+      const currentAfterResume = this.store.get(sessionId);
+      await this.ensureManagedAttachment(
         sessionId,
+        currentAfterResume?.record,
         endpoint,
-        cwd,
-        current?.record.remote_worker_pid,
-        current?.record.remote_worker_log_path
+        effectiveCwd,
+        launchPrefs
       );
 
       this.store.update(sessionId, (record) => {
@@ -437,7 +463,16 @@ export class RemoteStopController {
     await this.store.save();
 
     if (this.notifyDelivered) {
-      await this.notifyDelivered(sessionId);
+      try {
+        await this.notifyDelivered(sessionId);
+      } catch (err) {
+        logger.warn('Remote delivery notification failed after inject success', {
+          sessionId,
+          threadId,
+          turnId: result.turnId,
+          error: (err as Error).message,
+        });
+      }
     }
 
     this.watchTurnCompletion(sessionId, endpoint, threadId, result.turnId);
@@ -465,7 +500,45 @@ export class RemoteStopController {
           return;
         }
 
+        const isLocalManaged = isLocalManagedSession(existing.record);
+        if (isLocalManaged && existing.record.remote_status !== 'running') {
+          return;
+        }
+
         const nextTotalTurns = existing.record.total_turns + 1;
+
+        if (isLocalManaged && this.settleManagedTurn) {
+          await this.settleManagedTurn(sessionId, {
+            turnId,
+            outputText: settlement.outputText,
+            totalTurns: nextTotalTurns,
+            remoteInputOwner: 'telegram',
+          });
+
+          if (
+            settlement.outputText.length > 0 &&
+            this.publishTurnOutput
+          ) {
+            const stopMessageId = await this.publishTurnOutput(sessionId, {
+              turnId,
+              outputText: settlement.outputText,
+              totalTurns: nextTotalTurns,
+            });
+            if (stopMessageId != null) {
+              this.store.update(sessionId, (record) => {
+                if (record.remote_mode_enabled !== true) {
+                  return;
+                }
+                if (record.remote_last_turn_id !== turnId) {
+                  return;
+                }
+                record.stop_message_id = stopMessageId;
+              });
+              await this.store.save();
+            }
+          }
+          return;
+        }
 
         this.store.update(sessionId, (record) => {
           if (record.remote_mode_enabled !== true) {
@@ -534,5 +607,54 @@ export class RemoteStopController {
         await this.store.save();
       }
     })();
+  }
+
+  private getDeferredLaunchPreferences(
+    sessionId: string,
+    record: SessionRecord
+  ): DeferredLaunchPreferences | undefined {
+    const resolved = record.pending_spawn_preferences
+      ?? this.resolveDeferredLaunchPreferences?.(sessionId, record);
+    if (!resolved) {
+      return undefined;
+    }
+    if (
+      resolved.model === undefined
+      && resolved['approval-policy'] === undefined
+      && resolved.sandbox === undefined
+      && resolved.cwd === undefined
+    ) {
+      return undefined;
+    }
+    return resolved;
+  }
+
+  private async ensureManagedAttachment(
+    sessionId: string,
+    record: SessionRecord | undefined,
+    endpoint: string,
+    cwd: string,
+    launchPrefs?: DeferredLaunchPreferences
+  ): Promise<void> {
+    if (record && isLocalManagedSession(record) && this.localConsoleRuntime) {
+      await this.ensureLocalConsoleAttached(
+        sessionId,
+        endpoint,
+        cwd,
+        record.local_attachment_id,
+        record.remote_worker_log_path,
+        launchPrefs
+      );
+      return;
+    }
+
+    await this.ensureWorkerAttached(
+      sessionId,
+      endpoint,
+      cwd,
+      record?.remote_worker_pid,
+      record?.remote_worker_log_path,
+      launchPrefs
+    );
   }
 }

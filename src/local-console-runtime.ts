@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { getConfigDir } from './config.js';
+import type { DeferredLaunchPreferences } from './types.js';
 
 type SpawnLike = typeof spawn;
 
@@ -11,6 +12,7 @@ type EnsureLocalConsoleArgs = {
   cwd: string;
   knownAttachmentId?: string | null;
   knownLogPath?: string | null;
+  launchPrefs?: DeferredLaunchPreferences;
 };
 
 type EnsureLocalConsoleResult = {
@@ -39,6 +41,7 @@ export class LocalConsoleRuntimeManager {
   async ensureAttached(args: EnsureLocalConsoleArgs): Promise<EnsureLocalConsoleResult> {
     const attachmentId = args.knownAttachmentId ?? buildLocalAttachmentId(args.sessionId);
     const logPath = args.knownLogPath ?? this.getLogPath(args.sessionId);
+    const effectiveCwd = args.launchPrefs?.cwd ?? args.cwd;
 
     if (await this.hasSession(attachmentId)) {
       return {
@@ -51,9 +54,9 @@ export class LocalConsoleRuntimeManager {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     const child = await this.spawnScreenSession({
       attachmentId,
-      cwd: args.cwd,
+      cwd: effectiveCwd,
       logPath,
-      command: buildCodexResumeCommand(args.sessionId, args.endpoint, args.cwd),
+      command: buildCodexResumeCommand(args.sessionId, args.endpoint, effectiveCwd, args.launchPrefs),
     });
 
     if (!child.pid) {
@@ -84,15 +87,22 @@ export class LocalConsoleRuntimeManager {
     cwd: string;
     initialPrompt?: string;
     env?: Record<string, string>;
+    launchPrefs?: DeferredLaunchPreferences;
   }): Promise<EnsureLocalConsoleResult> {
     const logPath = this.getLogPath(args.attachmentId);
+    const effectiveCwd = args.launchPrefs?.cwd ?? args.cwd;
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
 
     const child = await this.spawnScreenSession({
       attachmentId: args.attachmentId,
-      cwd: args.cwd,
+      cwd: effectiveCwd,
       logPath,
-      command: buildCodexRemoteOpenCommand(args.endpoint, args.cwd, args.initialPrompt),
+      command: buildCodexRemoteOpenCommand(
+        args.endpoint,
+        effectiveCwd,
+        args.initialPrompt,
+        args.launchPrefs
+      ),
       exports: args.env ?? {},
     });
 
@@ -212,37 +222,82 @@ export function buildLocalAttachmentId(sessionId: string): string {
   return `tl-local-${sessionId}`;
 }
 
-function buildCodexResumeCommand(sessionId: string, endpoint: string, cwd: string): string {
-  const args = [
-    'resume',
-    '--remote',
+function buildCodexResumeCommand(
+  sessionId: string,
+  endpoint: string,
+  cwd: string,
+  launchPrefs?: DeferredLaunchPreferences
+): string {
+  return `codex ${buildCodexCommandArgs({
+    action: 'resume',
     endpoint,
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--no-alt-screen',
-    '--cd',
     cwd,
     sessionId,
-  ];
-  return `codex ${args.map(shellQuote).join(' ')}`;
+    launchPrefs,
+  }).map(shellQuote).join(' ')}`;
 }
 
 function buildCodexRemoteOpenCommand(
   endpoint: string,
   cwd: string,
-  initialPrompt?: string
+  initialPrompt?: string,
+  launchPrefs?: DeferredLaunchPreferences
 ): string {
-  const args = [
-    '--remote',
+  return `codex ${buildCodexCommandArgs({
+    action: 'open',
     endpoint,
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--no-alt-screen',
-    '--cd',
     cwd,
-  ];
-  if (initialPrompt && initialPrompt.trim().length > 0) {
-    args.push(initialPrompt);
+    initialPrompt,
+    launchPrefs,
+  }).map(shellQuote).join(' ')}`;
+}
+
+function buildCodexCommandArgs(args: {
+  action: 'resume' | 'open';
+  endpoint: string;
+  cwd: string;
+  sessionId?: string;
+  initialPrompt?: string;
+  launchPrefs?: DeferredLaunchPreferences;
+}): string[] {
+  const commandArgs: string[] = [];
+  if (args.action === 'resume') {
+    commandArgs.push('resume');
   }
-  return `codex ${args.map(shellQuote).join(' ')}`;
+
+  commandArgs.push('--remote', args.endpoint);
+  appendLaunchPreferenceArgs(commandArgs, args.launchPrefs);
+  commandArgs.push('--no-alt-screen', '--cd', args.cwd);
+
+  if (args.action === 'resume' && args.sessionId) {
+    commandArgs.push(args.sessionId);
+  }
+  if (args.action === 'open' && args.initialPrompt && args.initialPrompt.trim().length > 0) {
+    commandArgs.push(args.initialPrompt);
+  }
+
+  return commandArgs;
+}
+
+function appendLaunchPreferenceArgs(
+  commandArgs: string[],
+  launchPrefs?: DeferredLaunchPreferences
+): void {
+  if (launchPrefs?.model) {
+    commandArgs.push('--model', launchPrefs.model);
+  }
+
+  const approvalPolicy = launchPrefs?.['approval-policy'];
+  const sandbox = launchPrefs?.sandbox;
+  if (approvalPolicy) {
+    commandArgs.push('--ask-for-approval', approvalPolicy);
+  }
+  if (sandbox) {
+    commandArgs.push('--sandbox', sandbox);
+  }
+  if (!approvalPolicy && !sandbox) {
+    commandArgs.push('--dangerously-bypass-approvals-and-sandbox');
+  }
 }
 
 function buildScreenShellCommand(

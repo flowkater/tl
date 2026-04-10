@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { getConfigDir } from './config.js';
+import type { DeferredLaunchPreferences } from './types.js';
 
 type SpawnLike = typeof spawn;
 
@@ -11,6 +12,7 @@ type EnsureRemoteWorkerArgs = {
   cwd: string;
   knownPid?: number | null;
   knownLogPath?: string | null;
+  launchPrefs?: DeferredLaunchPreferences;
 };
 
 type EnsureRemoteWorkerResult = {
@@ -60,7 +62,13 @@ export class RemoteWorkerRuntimeManager {
     const logPath = args.knownLogPath ?? this.getLogPath(args.sessionId);
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
 
-    const child = this.spawnWorker(args.sessionId, args.endpoint, args.cwd, logPath);
+    const child = this.spawnWorker(
+      args.sessionId,
+      args.endpoint,
+      args.launchPrefs?.cwd ?? args.cwd,
+      logPath,
+      args.launchPrefs
+    );
     if (!child.pid) {
       throw new Error(`Failed to launch remote worker for ${args.sessionId}`);
     }
@@ -98,7 +106,8 @@ export class RemoteWorkerRuntimeManager {
     sessionId: string,
     endpoint: string,
     cwd: string,
-    logPath: string
+    logPath: string,
+    launchPrefs?: DeferredLaunchPreferences
   ): ChildProcess {
     const options: SpawnOptions = {
       cwd,
@@ -117,12 +126,7 @@ export class RemoteWorkerRuntimeManager {
         '-q',
         logPath,
         'codex',
-        'resume',
-        '--remote',
-        endpoint,
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--no-alt-screen',
-        sessionId,
+        ...buildCodexResumeArgs(sessionId, endpoint, cwd, launchPrefs),
       ],
       options
     );
@@ -164,4 +168,32 @@ export class RemoteWorkerRuntimeManager {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildCodexResumeArgs(
+  sessionId: string,
+  endpoint: string,
+  cwd: string,
+  launchPrefs?: DeferredLaunchPreferences
+): string[] {
+  const args = ['resume', '--remote', endpoint];
+
+  if (launchPrefs?.model) {
+    args.push('--model', launchPrefs.model);
+  }
+
+  const approvalPolicy = launchPrefs?.['approval-policy'];
+  const sandbox = launchPrefs?.sandbox;
+  if (approvalPolicy) {
+    args.push('--ask-for-approval', approvalPolicy);
+  }
+  if (sandbox) {
+    args.push('--sandbox', sandbox);
+  }
+  if (!approvalPolicy && !sandbox) {
+    args.push('--dangerously-bypass-approvals-and-sandbox');
+  }
+
+  args.push('--no-alt-screen', '--cd', cwd, sessionId);
+  return args;
 }

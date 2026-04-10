@@ -246,6 +246,29 @@ describe('TelegramBot.init', () => {
     expect(messageId).toBe(321);
   });
 
+  it('honors Telegram retry-after delays for rate-limited sends', async () => {
+    const sendMessage = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("Call to 'sendMessage' failed! (429: Too Many Requests: retry after 6)")
+      )
+      .mockResolvedValueOnce({ message_id: 654 });
+    const bot = new TelegramBot(config, { listActive: () => [] } as any, {
+      deliver: () => false,
+    } as any);
+    const delaySpy = vi
+      .spyOn(bot as any, 'delay')
+      .mockResolvedValue(undefined);
+
+    (bot as any).bot = { api: { sendMessage } };
+
+    const messageId = await bot.sendWorkingMessage(config.groupId, 42);
+
+    expect(delaySpy).toHaveBeenCalledWith(6000);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(messageId).toBe(654);
+  });
+
   it('sends resume ACK as a plain topic message', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 901 });
     const bot = new TelegramBot(config, { listActive: () => [] } as any, {
@@ -489,6 +512,259 @@ describe('TelegramBot.init', () => {
     );
   });
 
+  it('intercepts /tl set and persists topic defaults without routing into the session', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 778 });
+    const deliver = vi.fn().mockReturnValue(true);
+    const topicPreferences = {
+      get: vi.fn(() => ({
+        updated_at: '2026-04-11T00:00:00.000Z',
+        skill: ['systematic-debugging'],
+      })),
+      set: vi.fn(),
+      clearField: vi.fn(),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'waiting',
+            stop_message_id: 77,
+            started_at: '2026-04-06T00:00:00.000Z',
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver,
+    } as any, topicPreferences as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction: vi.fn() } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '/tl set skill systematic-debugging',
+      },
+    });
+
+    expect(topicPreferences.set).toHaveBeenCalledWith(
+      `${config.groupId}:42`,
+      expect.objectContaining({
+        skill: ['systematic-debugging'],
+      })
+    );
+    expect(topicPreferences.save).toHaveBeenCalledTimes(1);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      expect.stringContaining('topic defaults updated'),
+      { message_thread_id: 42 }
+    );
+  });
+
+  it('rejects invalid directive headers with explicit topic feedback and skips delivery', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 779 });
+    const deliver = vi.fn().mockReturnValue(true);
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'waiting',
+            stop_message_id: 77,
+            started_at: '2026-04-06T00:00:00.000Z',
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver,
+    } as any, {
+      get: vi.fn(() => undefined),
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction: vi.fn() } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '@model: none\n\nInvestigate this crash',
+      },
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      '⚠️ none only clears skill and cmd',
+      { message_thread_id: 42 }
+    );
+  });
+
+  it('normalizes topic defaults and message headers before delivering to a waiting session', async () => {
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const deliver = vi.fn().mockReturnValue(true);
+    const topicPreferences = {
+      get: vi.fn(() => ({
+        updated_at: '2026-04-11T00:00:00.000Z',
+        skill: ['systematic-debugging'],
+        cmd: ['/compact'],
+        model: 'gpt-5.4',
+      })),
+    };
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'waiting',
+            stop_message_id: 77,
+            started_at: '2026-04-06T00:00:00.000Z',
+          },
+        },
+      ],
+      listByStatus: () => [],
+    } as any, {
+      deliver,
+    } as any, topicPreferences as any);
+
+    (bot as any).bot = { api: { sendMessage: vi.fn(), setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '@cmd: /trace\n\nInvestigate this crash',
+      },
+    });
+
+    expect(deliver).toHaveBeenCalledWith(
+      's1',
+      '/trace\n\n[TL directives]\n\nUse these skills for this turn: systematic-debugging\n\n[/TL directives]\n\nInvestigate this crash'
+    );
+  });
+
+  it('persists deferred header overrides for the next managed spawn and emits an informational ack', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 781 });
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const deliver = vi.fn().mockReturnValue(true);
+    const session = {
+      topic_id: 42,
+      status: 'waiting',
+      stop_message_id: 77,
+      started_at: '2026-04-06T00:00:00.000Z',
+      pending_spawn_preferences: null,
+    };
+    const update = vi.fn((_id: string, fn: (record: typeof session) => void) => fn(session));
+    const save = vi.fn().mockResolvedValue(undefined);
+    const topicPreferences = {
+      get: vi.fn(() => ({
+        updated_at: '2026-04-11T00:00:00.000Z',
+        skill: ['systematic-debugging'],
+        cwd: '/tmp/topic-default',
+      })),
+    };
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: session,
+        },
+      ],
+      listByStatus: () => [],
+      update,
+      save,
+    } as any, {
+      deliver,
+    } as any, topicPreferences as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '@model: gpt-5.5\n@sandbox: workspace-write\n\nInvestigate this crash',
+      },
+    });
+
+    expect(deliver).toHaveBeenCalledWith(
+      's1',
+      '[TL directives]\n\nUse these skills for this turn: systematic-debugging\n\n[/TL directives]\n\nInvestigate this crash'
+    );
+    expect(update).toHaveBeenCalled();
+    expect(session.pending_spawn_preferences).toEqual({
+      model: 'gpt-5.5',
+      sandbox: 'workspace-write',
+      cwd: '/tmp/topic-default',
+    });
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      'ℹ️ deferred spawn override saved for next managed spawn or reattach; current attached session is unchanged',
+      { message_thread_id: 42 }
+    );
+  });
+
+  it('reports /tl resume failure when no waiting consumer receives the signal', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 780 });
+    const deliver = vi.fn().mockReturnValue(false);
+    const update = vi.fn();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const bot = new TelegramBot(config, {
+      listActive: () => [
+        {
+          id: 's1',
+          record: {
+            topic_id: 42,
+            status: 'waiting',
+            stop_message_id: 77,
+            started_at: '2026-04-06T00:00:00.000Z',
+          },
+        },
+      ],
+      listByStatus: () => [],
+      update,
+      save,
+    } as any, {
+      deliver,
+    } as any, {
+      get: vi.fn(() => undefined),
+    } as any);
+
+    (bot as any).bot = { api: { sendMessage, setMessageReaction: vi.fn() } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '/tl resume',
+      },
+    });
+
+    expect(deliver).toHaveBeenCalledWith('s1', '/resume', {
+      queueIfMissing: false,
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      '⚠️ resume delivery failed: no waiting consumer is attached to this topic',
+      { message_thread_id: 42 }
+    );
+  });
+
   it('uses the late reply handler instead of the not-waiting notice for matched stop replies', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
     const setMessageReaction = vi.fn().mockResolvedValue(undefined);
@@ -584,6 +860,80 @@ describe('TelegramBot.init', () => {
       config.groupId,
       '⚠️ 지금은 reply 대기 상태가 아닙니다. 다음 작업 완료 메시지에 Reply해주세요',
       expect.anything()
+    );
+  });
+
+  it('persists deferred overrides on the active remote-managed fast path and reports them in /tl show config', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 999 });
+    const setMessageReaction = vi.fn().mockResolvedValue(undefined);
+    const remoteReplyHandler = vi.fn().mockResolvedValue(true);
+    const session = {
+      topic_id: 42,
+      status: 'active',
+      mode: 'remote-managed',
+      stop_message_id: 77,
+      remote_mode_enabled: true,
+      remote_input_owner: 'telegram',
+      remote_status: 'idle',
+      remote_endpoint: 'ws://127.0.0.1:4321',
+      remote_thread_id: 'thread-1',
+      remote_last_resume_at: null,
+      remote_last_resume_error: null,
+      pending_spawn_preferences: null,
+    };
+    const update = vi.fn((_id: string, fn: (record: typeof session) => void) => fn(session));
+    const save = vi.fn().mockResolvedValue(undefined);
+    const bot = new TelegramBot(config, {
+      listActive: () => [{ id: 's1', record: session }],
+      listByStatus: () => [],
+      update,
+      save,
+    } as any, {
+      deliver: vi.fn().mockReturnValue(false),
+    } as any, {
+      get: vi.fn(() => ({
+        updated_at: '2026-04-11T00:00:00.000Z',
+        cwd: '/tmp/topic-default',
+      })),
+    } as any);
+
+    bot.setRemoteReplyHandler(remoteReplyHandler);
+    (bot as any).bot = { api: { sendMessage, setMessageReaction } };
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 88,
+        message_thread_id: 42,
+        text: '@model: gpt-5.5\n\ncontinue remotely',
+      },
+    });
+
+    expect(remoteReplyHandler).toHaveBeenCalledWith('s1', 'continue remotely');
+    expect(session.pending_spawn_preferences).toEqual({
+      model: 'gpt-5.5',
+      cwd: '/tmp/topic-default',
+    });
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      'ℹ️ deferred spawn override saved for next managed spawn or reattach; current attached session is unchanged',
+      { message_thread_id: 42 }
+    );
+
+    await (bot as any).handleMessage({
+      chat: { id: config.groupId },
+      message: {
+        message_id: 89,
+        message_thread_id: 42,
+        text: '/tl show config',
+      },
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      config.groupId,
+      expect.stringContaining('pending spawn preferences:\nmodel: gpt-5.5\ncwd: /tmp/topic-default'),
+      { message_thread_id: 42 }
     );
   });
 

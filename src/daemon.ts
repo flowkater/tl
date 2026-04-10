@@ -7,9 +7,18 @@ import { DEFAULT_LOCAL_CODEX_ENDPOINT, getConfigDir, loadConfig } from './config
 import { SessionsStore } from './store.js';
 import { ReplyQueue } from './reply-queue.js';
 import { TelegramBot } from './telegram.js';
+import { TopicPreferencesStore } from './topic-preferences-store.js';
 import { SessionManagerImpl } from './session-manager.js';
 import { LateReplyResumer } from './late-reply-resumer.js';
-import { HookOutput } from './types.js';
+import {
+  HookOutput,
+  TelegramDirectiveField,
+  TopicPreferences,
+  type ApprovalPolicy,
+  type DeferredLaunchPreferences,
+  type SandboxMode,
+  type SessionRecord,
+} from './types.js';
 import { logger } from './logger.js';
 import { buildStopMessageFromTranscript } from './assistant-turn-output.js';
 import { AppServerClient } from './app-server-client.js';
@@ -32,8 +41,172 @@ type DaemonAppDeps = {
   remoteWorkerRuntime?: RemoteWorkerRuntimeManager;
   localConsoleRuntime?: LocalConsoleRuntimeManager;
   localManagedOpenController?: LocalManagedOpenController;
+  topicPreferences?: {
+    get(topicKey: string): TopicPreferences | undefined;
+    set(topicKey: string, preferences: Partial<TopicPreferences>): void;
+    clearField(topicKey: string, field: TelegramDirectiveField): void;
+    save(): Promise<void>;
+  };
   config?: Partial<ReturnType<typeof loadConfig>>;
 };
+
+type NotifyRemoteDeliveredArgs = {
+  sessionId: string;
+  groupId: number;
+  store: Pick<SessionsStore, 'get' | 'update' | 'save'>;
+  tg: Pick<TelegramBot, 'sendRemoteDeliveredMessage' | 'sendWorkingMessage'>;
+  sessionManager: Pick<SessionManagerImpl, 'handleWorking'>;
+};
+
+function isTopicPreferenceField(value: unknown): value is TelegramDirectiveField {
+  return (
+    value === 'skill' ||
+    value === 'cmd' ||
+    value === 'model' ||
+    value === 'approval-policy' ||
+    value === 'sandbox' ||
+    value === 'cwd'
+  );
+}
+
+function isValidTopicPreferenceValue(
+  field: TelegramDirectiveField,
+  value: unknown
+): value is string | string[] {
+  if (field === 'skill') {
+    return (
+      Array.isArray(value) &&
+      value.every((item) => {
+        if (typeof item !== 'string') {
+          return false;
+        }
+        const trimmed = item.trim();
+        return trimmed.length > 0 && !/\s/.test(trimmed);
+      })
+    );
+  }
+  if (field === 'cmd') {
+    return (
+      Array.isArray(value) &&
+      value.every((item) => {
+        if (typeof item !== 'string') {
+          return false;
+        }
+        const trimmed = item.trim();
+        return trimmed.length > 0 && trimmed.startsWith('/');
+      })
+    );
+  }
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  if (field === 'model') {
+    return !/\s/.test(trimmed);
+  }
+  if (field === 'approval-policy') {
+    return trimmed === 'never'
+      || trimmed === 'on-request'
+      || trimmed === 'on-failure'
+      || trimmed === 'untrusted';
+  }
+  if (field === 'sandbox') {
+    return trimmed === 'danger-full-access'
+      || trimmed === 'workspace-write'
+      || trimmed === 'read-only';
+  }
+
+  return true;
+}
+
+function normalizeTopicPreferenceValue(
+  field: TelegramDirectiveField,
+  value: string | string[]
+): string | string[] {
+  if (field === 'skill' || field === 'cmd') {
+    return Array.isArray(value)
+      ? value.map((item) => item.trim())
+      : [value.trim()];
+  }
+
+  return Array.isArray(value) ? value[0]?.trim() ?? '' : value.trim();
+}
+
+function extractDeferredLaunchPreferences(
+  source: Partial<Record<TelegramDirectiveField, unknown>> | null | undefined
+): DeferredLaunchPreferences | undefined {
+  if (!source) {
+    return undefined;
+  }
+
+  const model = typeof source.model === 'string' ? source.model.trim() : undefined;
+  const approvalPolicyRaw = source['approval-policy'];
+  const sandboxRaw = source.sandbox;
+  const cwd = typeof source.cwd === 'string' ? source.cwd.trim() : undefined;
+  const approvalPolicy = typeof approvalPolicyRaw === 'string' && approvalPolicyRaw.trim().length > 0
+    ? approvalPolicyRaw.trim() as ApprovalPolicy
+    : undefined;
+  const sandbox = typeof sandboxRaw === 'string' && sandboxRaw.trim().length > 0
+    ? sandboxRaw.trim() as SandboxMode
+    : undefined;
+
+  if (!model && !approvalPolicy && !sandbox && !cwd) {
+    return undefined;
+  }
+
+  return {
+    ...(model ? { model } : {}),
+    ...(approvalPolicy ? { 'approval-policy': approvalPolicy } : {}),
+    ...(sandbox ? { sandbox } : {}),
+    ...(cwd ? { cwd } : {}),
+  };
+}
+
+function validateDeferredLaunchPreferenceOverrides(
+  source: Partial<Record<TelegramDirectiveField, unknown>> | null | undefined
+): { error: string | null } {
+  if (!source) {
+    return { error: null };
+  }
+
+  for (const field of ['model', 'approval-policy', 'sandbox', 'cwd'] as const) {
+    const value = source[field];
+    if (value === undefined) {
+      continue;
+    }
+    if (!isValidTopicPreferenceValue(field, value)) {
+      return { error: `Invalid value for field: ${field}` };
+    }
+  }
+
+  return { error: null };
+}
+
+function mergeDeferredLaunchPreferences(
+  base?: DeferredLaunchPreferences,
+  override?: DeferredLaunchPreferences
+): DeferredLaunchPreferences | undefined {
+  const merged = {
+    ...(base ?? {}),
+    ...(override ?? {}),
+  };
+
+  if (
+    merged.model === undefined
+    && merged['approval-policy'] === undefined
+    && merged.sandbox === undefined
+    && merged.cwd === undefined
+  ) {
+    return undefined;
+  }
+
+  return merged;
+}
 
 function getPidPath(): string {
   return `${getConfigDir()}/daemon.pid`;
@@ -82,6 +255,58 @@ function runBackgroundTask(
   })();
 }
 
+export async function notifyRemoteDelivered({
+  sessionId,
+  groupId,
+  store,
+  tg,
+  sessionManager,
+}: NotifyRemoteDeliveredArgs): Promise<void> {
+  const existing = store.get(sessionId);
+  if (!existing) {
+    return;
+  }
+
+  let deliveredAckSent = false;
+  try {
+    await tg.sendRemoteDeliveredMessage(groupId, existing.record.topic_id);
+    deliveredAckSent = true;
+  } catch (err) {
+    logger.warn('Remote delivered ack failed', {
+      sessionId,
+      topicId: existing.record.topic_id,
+      error: (err as Error).message,
+    });
+  }
+
+  if (existing.record.mode === 'local-managed') {
+    await sessionManager.handleWorking({ session_id: sessionId });
+
+    store.update(sessionId, (record) => {
+      if (deliveredAckSent) {
+        record.last_resume_ack_at = new Date().toISOString();
+      }
+      record.remote_input_owner = 'telegram';
+    });
+    await store.save();
+    return;
+  }
+
+  await tg.sendWorkingMessage(groupId, existing.record.topic_id);
+
+  store.update(sessionId, (record) => {
+    const now = new Date().toISOString();
+    if (deliveredAckSent) {
+      record.last_resume_ack_at = now;
+    }
+    record.last_progress_at = now;
+    record.remote_input_owner = 'telegram';
+    record.remote_status = 'running';
+    record.remote_last_error = null;
+  });
+  await store.save();
+}
+
 export function createDaemonApp({
   store,
   replyQueue,
@@ -93,9 +318,35 @@ export function createDaemonApp({
   remoteWorkerRuntime,
   localConsoleRuntime,
   localManagedOpenController,
+  topicPreferences,
   config,
 }: DaemonAppDeps): Hono {
   const app = new Hono();
+  const buildTopicKey = (chatId: string | number, topicId: string | number): string => (
+    `${chatId}:${topicId}`
+  );
+  const getTopicDeferredLaunchPreferences = (
+    chatId: number | string | null | undefined,
+    topicId: number | string | null | undefined
+  ): DeferredLaunchPreferences | undefined => {
+    if (!topicPreferences || chatId == null || topicId == null) {
+      return undefined;
+    }
+    return extractDeferredLaunchPreferences(topicPreferences.get(buildTopicKey(chatId, topicId)));
+  };
+  const getSessionDeferredLaunchPreferences = (
+    record: Pick<SessionRecord, 'chat_id' | 'topic_id' | 'pending_spawn_preferences'>
+  ): DeferredLaunchPreferences | undefined => (
+    record.pending_spawn_preferences ?? getTopicDeferredLaunchPreferences(record.chat_id ?? null, record.topic_id)
+  );
+  const getBodyDeferredLaunchPreferences = (body: Record<string, unknown>): DeferredLaunchPreferences | undefined => (
+    extractDeferredLaunchPreferences({
+      model: body.model,
+      'approval-policy': body['approval-policy'] ?? body.approval_policy,
+      sandbox: body.sandbox,
+      cwd: body.cwd,
+    })
+  );
 
   const resolveLocalEndpoint = (override?: string): string => {
     if (override && override.trim().length > 0) {
@@ -276,14 +527,100 @@ export function createDaemonApp({
       queueIfMissing: false,
     });
     if (!delivered) {
-      // waiting consumer가 없으면 세션만 active로 변경
-      store.update(body.session_id, (record) => {
-        record.status = 'active';
-      });
-      await store.save();
+      return c.json(
+        {
+          error: 'Resume delivery failed: no waiting consumer',
+          session_id: body.session_id,
+        },
+        409
+      );
     }
 
     return c.json({ status: 'resumed', session_id: body.session_id });
+  });
+
+  app.get('/topic-preferences', async (c) => {
+    if (!topicPreferences) {
+      return c.json({ error: 'topic preferences unavailable' }, 503);
+    }
+
+    const chatId = c.req.query('chat_id');
+    const topicId = c.req.query('topic_id');
+    if (!chatId || !topicId) {
+      return c.json({ error: 'Missing chat_id or topic_id' }, 400);
+    }
+
+    const topicKey = buildTopicKey(chatId, topicId);
+    return c.json({
+      topic_key: topicKey,
+      preferences: topicPreferences.get(topicKey) ?? null,
+    });
+  });
+
+  app.post('/topic-preferences/set', async (c) => {
+    if (!topicPreferences) {
+      return c.json({ error: 'topic preferences unavailable' }, 503);
+    }
+
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.chat_id || !body.topic_id || !body.field || body.value === undefined) {
+      return c.json({ error: 'Missing chat_id, topic_id, field, or value' }, 400);
+    }
+    if (!isTopicPreferenceField(body.field)) {
+      return c.json({ error: `Unknown field: ${String(body.field)}` }, 400);
+    }
+    if (!isValidTopicPreferenceValue(body.field, body.value)) {
+      return c.json({ error: `Invalid value for field: ${body.field}` }, 400);
+    }
+
+    const topicKey = buildTopicKey(body.chat_id, body.topic_id);
+    const normalizedValue = normalizeTopicPreferenceValue(body.field, body.value);
+    topicPreferences.set(topicKey, {
+      [body.field]: normalizedValue,
+    } as Partial<TopicPreferences>);
+    await topicPreferences.save();
+
+    return c.json({
+      status: 'ok',
+      topic_key: topicKey,
+      preferences: topicPreferences.get(topicKey) ?? null,
+    });
+  });
+
+  app.post('/topic-preferences/clear', async (c) => {
+    if (!topicPreferences) {
+      return c.json({ error: 'topic preferences unavailable' }, 503);
+    }
+
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    if (!body.chat_id || !body.topic_id || !body.field) {
+      return c.json({ error: 'Missing chat_id, topic_id, or field' }, 400);
+    }
+    if (!isTopicPreferenceField(body.field)) {
+      return c.json({ error: `Unknown field: ${String(body.field)}` }, 400);
+    }
+
+    const topicKey = buildTopicKey(body.chat_id, body.topic_id);
+    topicPreferences.clearField(topicKey, body.field);
+    await topicPreferences.save();
+
+    return c.json({
+      status: 'ok',
+      topic_key: topicKey,
+      preferences: topicPreferences.get(topicKey) ?? null,
+    });
   });
 
   // ===== POST /remote/attach =====
@@ -337,12 +674,30 @@ export function createDaemonApp({
       return c.json({ error: 'Invalid JSON' }, 400);
     }
 
-    if (!body.cwd || !body.endpoint) {
-      return c.json({ error: 'Missing cwd or endpoint' }, 400);
+    if (!body.endpoint) {
+      return c.json({ error: 'Missing endpoint' }, 400);
     }
 
-    const cwd = body.cwd;
-    const model = body.model ?? 'gpt-5.4';
+    const bodyLaunchSource = {
+      model: body.model,
+      'approval-policy': body['approval-policy'] ?? body.approval_policy,
+      sandbox: body.sandbox,
+      cwd: body.cwd,
+    } as const;
+    const bodyLaunchValidation = validateDeferredLaunchPreferenceOverrides(bodyLaunchSource);
+    if (bodyLaunchValidation.error) {
+      return c.json({ error: bodyLaunchValidation.error }, 400);
+    }
+
+    const launchPrefs = mergeDeferredLaunchPreferences(
+      getTopicDeferredLaunchPreferences(body.chat_id ?? null, body.topic_id ?? null),
+      getBodyDeferredLaunchPreferences(bodyLaunchSource as Record<string, unknown>)
+    );
+    const cwd = launchPrefs?.cwd ?? body.cwd;
+    if (!cwd) {
+      return c.json({ error: 'Missing cwd or endpoint' }, 400);
+    }
+    const model = launchPrefs?.model ?? 'gpt-5.4';
     const initialText = typeof body.initial_text === 'string' ? body.initial_text : '';
     const project = typeof body.project === 'string' && body.project.trim().length > 0
       ? body.project.trim()
@@ -353,6 +708,8 @@ export function createDaemonApp({
       const thread = await appServerClient.createThread({
         endpoint: body.endpoint,
         cwd,
+        approvalPolicy: launchPrefs?.['approval-policy'],
+        sandbox: launchPrefs?.sandbox,
       });
 
       await sessionManager.handleSessionStart({
@@ -365,11 +722,17 @@ export function createDaemonApp({
         remote_endpoint: body.endpoint,
         remote_thread_id: thread.threadId,
       });
+      store.update(thread.threadId, (record) => {
+        record.pending_spawn_preferences = launchPrefs ?? null;
+      });
       await store.save();
       await remoteStopController.ensureWorkerAttached(
         thread.threadId,
         body.endpoint,
-        cwd
+        cwd,
+        undefined,
+        undefined,
+        launchPrefs
       );
 
       let delivery: Awaited<ReturnType<RemoteStopController['handleReply']>> | null = null;
@@ -412,12 +775,26 @@ export function createDaemonApp({
       return c.json({ error: 'Invalid JSON' }, 400);
     }
 
-    if (!body.cwd) {
-      return c.json({ error: 'Missing cwd' }, 400);
+    const bodyLaunchSource = {
+      model: body.model,
+      'approval-policy': body['approval-policy'] ?? body.approval_policy,
+      sandbox: body.sandbox,
+      cwd: body.cwd,
+    } as const;
+    const bodyLaunchValidation = validateDeferredLaunchPreferenceOverrides(bodyLaunchSource);
+    if (bodyLaunchValidation.error) {
+      return c.json({ error: bodyLaunchValidation.error }, 400);
     }
 
-    const cwd = body.cwd;
-    const model = body.model ?? 'gpt-5.4';
+    const launchPrefs = mergeDeferredLaunchPreferences(
+      getTopicDeferredLaunchPreferences(body.chat_id ?? null, body.topic_id ?? null),
+      getBodyDeferredLaunchPreferences(bodyLaunchSource as Record<string, unknown>)
+    );
+    const cwd = launchPrefs?.cwd ?? body.cwd;
+    if (!cwd) {
+      return c.json({ error: 'Missing cwd' }, 400);
+    }
+    const model = launchPrefs?.model ?? 'gpt-5.4';
     const initialText = typeof body.initial_text === 'string' ? body.initial_text : '';
     const project = typeof body.project === 'string' && body.project.trim().length > 0
       ? body.project.trim()
@@ -435,6 +812,8 @@ export function createDaemonApp({
       const thread = await appServerClient.createThread({
         endpoint,
         cwd,
+        approvalPolicy: launchPrefs?.['approval-policy'],
+        sandbox: launchPrefs?.sandbox,
       });
 
       const delivery = await appServerClient.injectLocalInput({
@@ -464,6 +843,9 @@ export function createDaemonApp({
         remote_endpoint: endpoint,
         remote_thread_id: thread.threadId,
       });
+      store.update(thread.threadId, (record) => {
+        record.pending_spawn_preferences = launchPrefs ?? null;
+      });
 
       const consoleSession = await localConsoleRuntime.ensureAttached({
         sessionId: thread.threadId,
@@ -471,6 +853,7 @@ export function createDaemonApp({
         cwd,
         knownAttachmentId: attachmentId,
         knownLogPath: null,
+        launchPrefs,
       });
 
       store.update(thread.threadId, (record) => {
@@ -484,6 +867,7 @@ export function createDaemonApp({
         record.remote_worker_log_path = consoleSession.logPath;
       });
       await store.save();
+      localManagedOpenController?.monitorSession(thread.threadId);
 
       const created = store.get(thread.threadId);
 
@@ -640,6 +1024,7 @@ export function createDaemonApp({
         worker_log_path: existing.record.remote_worker_log_path,
         worker_last_error: existing.record.remote_worker_last_error,
         attached: hasRemoteSessionAttachment(existing.record),
+        pending_spawn_preferences: getSessionDeferredLaunchPreferences(existing.record) ?? null,
         total_turns: existing.record.total_turns,
         pristine: existing.record.total_turns === 0,
       });
@@ -664,6 +1049,7 @@ export function createDaemonApp({
         worker_pid: record.remote_worker_pid,
         worker_log_path: record.remote_worker_log_path,
         worker_last_error: record.remote_worker_last_error,
+        pending_spawn_preferences: getSessionDeferredLaunchPreferences(record) ?? null,
         total_turns: record.total_turns,
         pristine: record.total_turns === 0,
       }));
@@ -692,6 +1078,7 @@ export function createDaemonApp({
         local_attachment_id: existing.record.local_attachment_id ?? null,
         remote_status: existing.record.remote_status,
         attached: hasRemoteSessionAttachment(existing.record),
+        pending_spawn_preferences: getSessionDeferredLaunchPreferences(existing.record) ?? null,
         total_turns: existing.record.total_turns,
         pristine: existing.record.total_turns === 0,
       });
@@ -712,6 +1099,7 @@ export function createDaemonApp({
         local_attachment_id: record.local_attachment_id ?? null,
         remote_status: record.remote_status,
         attached: hasRemoteSessionAttachment(record),
+        pending_spawn_preferences: getSessionDeferredLaunchPreferences(record) ?? null,
         total_turns: record.total_turns,
         pristine: record.total_turns === 0,
       }));
@@ -901,9 +1289,11 @@ async function main() {
   const replyQueue = new ReplyQueue();
   replyQueue.startCleanupInterval();
   await replyQueue.processFileQueue();
+  const topicPreferences = new TopicPreferencesStore();
+  await topicPreferences.load();
 
   // Telegram 봇 초기화
-  const tg = new TelegramBot(config, store, replyQueue);
+  const tg = new TelegramBot(config, store, replyQueue, topicPreferences);
   await tg.init();
 
   // 세션 매니저 초기화
@@ -924,23 +1314,13 @@ async function main() {
     localConsoleRuntime,
     {
       notifyDelivered: async (sessionId) => {
-        const existing = store.get(sessionId);
-        if (!existing) {
-          return;
-        }
-
-        await tg.sendRemoteDeliveredMessage(config.groupId, existing.record.topic_id);
-        await tg.sendWorkingMessage(config.groupId, existing.record.topic_id);
-
-        store.update(sessionId, (record) => {
-          const now = new Date().toISOString();
-          record.last_resume_ack_at = now;
-          record.last_progress_at = now;
-          record.remote_input_owner = 'telegram';
-          record.remote_status = 'running';
-          record.remote_last_error = null;
+        await notifyRemoteDelivered({
+          sessionId,
+          groupId: config.groupId,
+          store,
+          tg,
+          sessionManager,
         });
-        await store.save();
       },
       notifyRecovering: async (sessionId, phase) => {
         const existing = store.get(sessionId);
@@ -976,9 +1356,8 @@ async function main() {
         const mode = existing.record.mode === 'local-managed'
           ? 'local-managed'
           : 'remote-managed';
-        const remoteOwner = existing.record.mode === 'local-managed'
-          ? 'tui'
-          : 'telegram';
+        const remoteOwner = existing.record.remote_input_owner
+          ?? (existing.record.mode === 'local-managed' ? 'tui' : 'telegram');
 
         return await tg.sendStopMessage(
           config.groupId,
@@ -991,6 +1370,26 @@ async function main() {
             remoteStatus: 'idle',
             remoteOwner,
           }
+        );
+      },
+      settleManagedTurn: async (sessionId, args) => {
+        await sessionManager.handleManagedTurnSettled({
+          session_id: sessionId,
+          turn_id: args.turnId,
+          last_message: args.outputText,
+          total_turns: args.totalTurns,
+          remote_input_owner: args.remoteInputOwner,
+        });
+      },
+      resolveDeferredLaunchPreferences: (_sessionId, record) => {
+        if (record.pending_spawn_preferences) {
+          return record.pending_spawn_preferences;
+        }
+        if (record.chat_id == null) {
+          return undefined;
+        }
+        return extractDeferredLaunchPreferences(
+          topicPreferences.get(`${record.chat_id}:${record.topic_id}`)
         );
       },
     }
@@ -1038,6 +1437,7 @@ async function main() {
     remoteWorkerRuntime,
     localConsoleRuntime,
     localManagedOpenController,
+    topicPreferences,
     config,
   });
   localManagedOpenController.restoreSessionMonitors();

@@ -26,6 +26,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     late_reply_received_at: null,
     late_reply_resume_started_at: null,
     late_reply_resume_error: null,
+    pending_spawn_preferences: null,
     remote_mode_enabled: true,
     remote_input_owner: 'telegram',
     remote_status: 'attached',
@@ -52,10 +53,12 @@ describe('RemoteStopController', () => {
   let fallback: any;
   let runtime: any;
   let workerRuntime: any;
+  let localConsoleRuntime: any;
   let notifyDelivered: any;
   let notifyFailed: any;
   let notifyRecovering: any;
   let publishTurnOutput: any;
+  let settleManagedTurn: any;
   let settleTurnDeferred:
     | { promise: Promise<{ status: string | null }>; resolve: (value: { status: string | null }) => void }
     | null;
@@ -103,10 +106,18 @@ describe('RemoteStopController', () => {
         logPath: '/tmp/remote-worker.log',
       }),
     };
+    localConsoleRuntime = {
+      ensureAttached: vi.fn().mockResolvedValue({
+        started: true,
+        attachmentId: 'tl-local-s1',
+        logPath: '/tmp/local-console.log',
+      }),
+    };
     notifyDelivered = vi.fn().mockResolvedValue(undefined);
     notifyFailed = vi.fn().mockResolvedValue(undefined);
     notifyRecovering = vi.fn().mockResolvedValue(undefined);
     publishTurnOutput = vi.fn().mockResolvedValue(900);
+    settleManagedTurn = vi.fn().mockResolvedValue(undefined);
     settleTurnDeferred = null;
   });
 
@@ -144,6 +155,105 @@ describe('RemoteStopController', () => {
     expect(store._sessions.s1.remote_last_resume_error).toBeNull();
     expect(store._sessions.s1.remote_status).toBe('running');
     expect(store._sessions.s1.remote_last_error).toBeNull();
+  });
+
+  it('passes deferred launch preferences into remote worker reattach and recovery paths', async () => {
+    client.injectReply
+      .mockRejectedValueOnce(new Error('socket closed'))
+      .mockResolvedValueOnce({
+        mode: 'start',
+        turnId: 'turn-3',
+      });
+    store._sessions.s1.chat_id = -1001234567890;
+    store._sessions.s1.pending_spawn_preferences = {
+      model: 'gpt-5.4',
+      'approval-policy': 'on-request',
+      sandbox: 'workspace-write',
+      cwd: '/tmp/persisted-default',
+    };
+    const resolveDeferredLaunchPreferences = vi.fn((_sessionId, record) => (
+      record.pending_spawn_preferences ?? {
+        model: 'gpt-5.5',
+        'approval-policy': 'never',
+        sandbox: 'read-only',
+        cwd: '/tmp/changed-topic-default',
+      }
+    ));
+    const controller = new RemoteStopController(
+      store,
+      client,
+      fallback,
+      runtime,
+      workerRuntime,
+      undefined,
+      {
+        notifyDelivered,
+        notifyFailed,
+        notifyRecovering,
+        publishTurnOutput,
+        resolveDeferredLaunchPreferences,
+      } as any
+    );
+
+    const result = await controller.handleReply('s1', 'continue with prefs');
+
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-3',
+    });
+    expect(resolveDeferredLaunchPreferences).not.toHaveBeenCalled();
+    expect(workerRuntime.ensureAttached).toHaveBeenNthCalledWith(1, {
+      sessionId: 's1',
+      endpoint: 'ws://127.0.0.1:4321',
+      cwd: '/tmp/persisted-default',
+      knownPid: null,
+      knownLogPath: null,
+      launchPrefs: {
+        model: 'gpt-5.4',
+        'approval-policy': 'on-request',
+        sandbox: 'workspace-write',
+        cwd: '/tmp/persisted-default',
+      },
+    });
+    expect(runtime.ensureAvailable).toHaveBeenCalledWith(
+      'ws://127.0.0.1:4321',
+      '/tmp/persisted-default'
+    );
+    expect(workerRuntime.ensureAttached).toHaveBeenNthCalledWith(2, {
+      sessionId: 's1',
+      endpoint: 'ws://127.0.0.1:4321',
+      cwd: '/tmp/persisted-default',
+      knownPid: 4242,
+      knownLogPath: '/tmp/remote-worker.log',
+      launchPrefs: {
+        model: 'gpt-5.4',
+        'approval-policy': 'on-request',
+        sandbox: 'workspace-write',
+        cwd: '/tmp/persisted-default',
+      },
+    });
+  });
+
+  it('does not treat a Telegram delivery ACK failure as an injection failure', async () => {
+    notifyDelivered.mockRejectedValueOnce(new Error('telegram ack failed'));
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
+      notifyDelivered,
+      notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
+    });
+
+    const result = await controller.handleReply('s1', 'continue here');
+
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+    expect(client.injectReply).toHaveBeenCalledTimes(1);
+    expect(fallback.handle).not.toHaveBeenCalled();
+    expect(notifyRecovering).not.toHaveBeenCalled();
   });
 
   it('falls back to late-reply resume when remote injection fails', async () => {
@@ -291,5 +401,203 @@ describe('RemoteStopController', () => {
       outputText: 'remote answer',
       totalTurns: 2,
     });
+  });
+
+  it('degrades the remote session when the watched turn disappears', async () => {
+    let resolve!: (value: { status: string | null; outputText: string }) => void;
+    settleTurnDeferred = {
+      promise: new Promise((r) => {
+        resolve = r;
+      }),
+      resolve,
+    };
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
+      notifyDelivered,
+      notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
+    });
+
+    const result = await controller.handleReply('s1', 'continue here');
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+
+    settleTurnDeferred.resolve({ status: 'missing', outputText: '' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store._sessions.s1.remote_status).toBe('degraded');
+    expect(store._sessions.s1.remote_last_error).toBe('remote turn ended with status missing');
+    expect(store._sessions.s1.total_turns).toBe(1);
+    expect(publishTurnOutput).not.toHaveBeenCalled();
+  });
+
+  it('routes local-managed Telegram-triggered settlement through the managed settlement callback', async () => {
+    let resolve!: (value: { status: string | null; outputText: string }) => void;
+    settleTurnDeferred = {
+      promise: new Promise((r) => {
+        resolve = r;
+      }),
+      resolve,
+    };
+    store._sessions.s1 = makeRecord({
+      mode: 'local-managed',
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_attachment_id: 'tl-open-s1',
+      remote_input_owner: 'tui',
+      remote_status: 'idle',
+    });
+    const resolveDeferredLaunchPreferences = vi.fn(() => ({
+      model: 'gpt-5.4',
+      'approval-policy': 'never',
+      sandbox: 'danger-full-access',
+      cwd: '/tmp/local-topic-default',
+    }));
+    const controller = new RemoteStopController(
+      store,
+      client,
+      fallback,
+      runtime,
+      workerRuntime,
+      localConsoleRuntime,
+      {
+        notifyDelivered,
+        notifyFailed,
+        notifyRecovering,
+        publishTurnOutput,
+        settleManagedTurn,
+        resolveDeferredLaunchPreferences,
+      } as any
+    );
+
+    const result = await controller.handleReply('s1', 'continue from telegram');
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+    expect(localConsoleRuntime.ensureAttached).toHaveBeenCalledWith({
+      sessionId: 's1',
+      endpoint: 'ws://127.0.0.1:4321',
+      cwd: '/tmp/local-topic-default',
+      knownAttachmentId: 'tl-open-s1',
+      knownLogPath: null,
+      launchPrefs: {
+        model: 'gpt-5.4',
+        'approval-policy': 'never',
+        sandbox: 'danger-full-access',
+        cwd: '/tmp/local-topic-default',
+      },
+    });
+
+    settleTurnDeferred.resolve({ status: 'completed', outputText: 'local answer' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settleManagedTurn).toHaveBeenCalledWith('s1', {
+      turnId: 'turn-2',
+      outputText: 'local answer',
+      totalTurns: 2,
+      remoteInputOwner: 'telegram',
+    });
+    expect(publishTurnOutput).toHaveBeenCalledWith('s1', {
+      turnId: 'turn-2',
+      outputText: 'local answer',
+      totalTurns: 2,
+    });
+  });
+
+  it('keeps local-managed recovery on the local console path after an inject failure', async () => {
+    client.injectReply
+      .mockRejectedValueOnce(new Error('socket closed'))
+      .mockResolvedValueOnce({
+        mode: 'start',
+        turnId: 'turn-3',
+      });
+    store._sessions.s1 = makeRecord({
+      mode: 'local-managed',
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_attachment_id: 'tl-open-s1',
+      remote_input_owner: 'tui',
+      remote_status: 'idle',
+    });
+    const controller = new RemoteStopController(
+      store,
+      client,
+      fallback,
+      runtime,
+      workerRuntime,
+      localConsoleRuntime,
+      {
+        notifyDelivered,
+        notifyFailed,
+        notifyRecovering,
+        publishTurnOutput,
+      } as any
+    );
+
+    const result = await controller.handleReply('s1', 'continue from telegram');
+
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-3',
+    });
+    expect(localConsoleRuntime.ensureAttached).toHaveBeenCalledTimes(2);
+    expect(workerRuntime.ensureAttached).not.toHaveBeenCalled();
+    expect(runtime.ensureAvailable).toHaveBeenCalledWith('ws://127.0.0.1:4321', '/tmp/test');
+  });
+
+  it('skips local-managed settlement when the same turn was already settled elsewhere', async () => {
+    let resolve!: (value: { status: string | null; outputText: string }) => void;
+    settleTurnDeferred = {
+      promise: new Promise((r) => {
+        resolve = r;
+      }),
+      resolve,
+    };
+    store._sessions.s1 = makeRecord({
+      mode: 'local-managed',
+      local_bridge_enabled: true,
+      local_bridge_state: 'attached',
+      local_attachment_id: 'tl-open-s1',
+      remote_input_owner: 'tui',
+      remote_status: 'idle',
+    });
+    const controller = new RemoteStopController(store, client, fallback, runtime, workerRuntime, undefined, {
+      notifyDelivered,
+      notifyFailed,
+      notifyRecovering,
+      publishTurnOutput,
+      settleManagedTurn,
+    } as any);
+
+    const result = await controller.handleReply('s1', 'continue from telegram');
+    expect(result).toEqual({
+      handled: true,
+      mode: 'remote',
+      turnId: 'turn-2',
+    });
+
+    store._sessions.s1.remote_status = 'idle';
+    store._sessions.s1.total_turns = 2;
+    store._sessions.s1.remote_last_turn_id = 'turn-2';
+    store._sessions.s1.last_turn_output = 'local answer';
+
+    settleTurnDeferred.resolve({ status: 'completed', outputText: 'local answer' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settleManagedTurn).not.toHaveBeenCalled();
+    expect(publishTurnOutput).not.toHaveBeenCalled();
+    expect(store._sessions.s1.total_turns).toBe(2);
   });
 });

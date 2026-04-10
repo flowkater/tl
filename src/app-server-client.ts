@@ -229,6 +229,14 @@ function buildTextInput(text: string) {
   ];
 }
 
+function parseSteerMismatchActiveTurnId(message: string): string | null {
+  const match = message.match(/expected active turn id [`'"]?([^`'"]+)[`'"]? but found [`'"]?([^`'"]+)[`'"]?/i);
+  if (!match) {
+    return null;
+  }
+  return match[2] ?? null;
+}
+
 function defaultConnectionFactory(endpoint: string): Promise<AppServerConnection> {
   return WebSocketAppServerConnection.connect(endpoint, 10_000);
 }
@@ -274,11 +282,24 @@ export class AppServerClient {
       const activeTurn = [...turns].reverse().find((turn) => turn.status === 'inProgress');
 
       if (activeTurn?.id) {
-        const steer = await connection.request('turn/steer', {
-          threadId: args.threadId,
-          expectedTurnId: activeTurn.id,
-          input: buildTextInput(args.replyText),
-        });
+        let steer;
+        try {
+          steer = await connection.request('turn/steer', {
+            threadId: args.threadId,
+            expectedTurnId: activeTurn.id,
+            input: buildTextInput(args.replyText),
+          });
+        } catch (err) {
+          const recoveredTurnId = parseSteerMismatchActiveTurnId((err as Error).message);
+          if (!recoveredTurnId || recoveredTurnId === activeTurn.id) {
+            throw err;
+          }
+          steer = await connection.request('turn/steer', {
+            threadId: args.threadId,
+            expectedTurnId: recoveredTurnId,
+            input: buildTextInput(args.replyText),
+          });
+        }
         return {
           mode: 'steer',
           turnId: steer?.turnId ?? activeTurn.id,
@@ -344,7 +365,7 @@ export class AppServerClient {
           : [];
         const matched = [...turns].reverse().find((turn) => turn.id === args.turnId);
         const outputText = matched ? extractAssistantText(matched.items) : '';
-        if (matched && (matched.status !== 'inProgress' || outputText.length > 0)) {
+        if (matched && matched.status !== 'inProgress') {
           return {
             status: matched.status ?? null,
             outputText,
@@ -354,7 +375,7 @@ export class AppServerClient {
         const activeTurn = turns.some((turn) => turn.status === 'inProgress');
         if (!matched && !activeTurn) {
           return {
-            status: null,
+            status: 'missing',
             outputText: '',
           };
         }
@@ -380,8 +401,8 @@ export class AppServerClient {
     try {
       const response = await connection.request('thread/start', {
         cwd: args.cwd,
-        approvalPolicy: args.approvalPolicy ?? 'never',
-        sandbox: args.sandbox ?? 'danger-full-access',
+        ...(args.approvalPolicy ? { approvalPolicy: args.approvalPolicy } : {}),
+        ...(args.sandbox ? { sandbox: args.sandbox } : {}),
         experimentalRawEvents: false,
         persistExtendedHistory: false,
       });
